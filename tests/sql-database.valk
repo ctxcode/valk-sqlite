@@ -327,3 +327,108 @@ test "Complex conditions against a real database" {
     assert(changed == 3) // ada (10), eve and frank (owners)
     assert((db.value("SELECT count(*) FROM users WHERE active = 1") ! { assert(false) return }).to_int() == 2)
 }
+
+test "Upserts, pages and counts against a real database" {
+    let db = sqlite.database(memory() ! { assert(false) return })
+    defer db.close()
+    db.exec("CREATE TABLE counters (name TEXT PRIMARY KEY, n INTEGER NOT NULL)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    // The first write inserts, the second one writes over it
+    db.insert_into("counters")
+        .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+        .on_conflict_update(.{ "name" }, .{ "n" })
+        .run() ! { println(E.message) assert(false) return }
+    db.insert_into("counters")
+        .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(5) })
+        .on_conflict_update(.{ "name" }, .{ "n" })
+        .run() ! { println(E.message) assert(false) return }
+
+    assert((db.value("SELECT count(*) FROM counters") ! { assert(false) return }).to_int() == 1)
+    assert((db.value("SELECT n FROM counters WHERE name = 'visits'") ! { assert(false) return }).to_int() == 5)
+
+    // Or the row that is there is kept
+    db.insert_into("counters")
+        .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(99) })
+        .on_conflict_nothing(.{ "name" })
+        .run() ! { println(E.message) assert(false) return }
+    assert((db.value("SELECT n FROM counters WHERE name = 'visits'") ! { assert(false) return }).to_int() == 5)
+
+    // Pages and the count that belongs next to them
+    db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, published INTEGER)") ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 25 {
+        db.exec("INSERT INTO posts (title, published) VALUES (?, ?)", .{
+            sql.Value.of("post " + i)
+            sql.Value.of_bool(i % 5 != 0)
+        }) ! { assert(false) return }
+    }
+
+    let page_two = db.select("title")
+        .from("posts")
+        .where("published = ?", .{ sql.Value.of_bool(true) })
+        .order_by("id")
+        .page(2, 10)
+        .all() ! { println(E.message) assert(false) return }
+    assert(page_two.length == 10)
+    // 25 posts, every fifth unpublished: 20 published, so page two starts at the eleventh
+    assert(((page_two.get(0) !? .{}).get("title") !? sql.Value.null()).to_string() == "post 13")
+
+    // The count of the same query, without its page
+    let total = db.select("title")
+        .from("posts")
+        .where("published = ?", .{ sql.Value.of_bool(true) })
+        .order_by("id")
+        .page(2, 10)
+        .count() ! { println(E.message) assert(false) return }
+    assert(total == 20)
+
+    // A join written with the table and the condition apart
+    db.exec("CREATE TABLE comments (id INTEGER PRIMARY KEY, post_id INTEGER, body TEXT)") ! { assert(false) return }
+    db.exec("INSERT INTO comments (post_id, body) VALUES (1, 'first'), (1, 'second'), (2, 'third')") ! { assert(false) return }
+    let with_comments = db.select("posts.title, count(comments.id) AS comments")
+        .from("posts")
+        .left_join("comments", "comments.post_id = posts.id")
+        .where("posts.id < ?", .{ sql.Value.of_int(4) })
+        .group_by("posts.id")
+        .order_by("posts.id")
+        .all() ! { println(E.message) assert(false) return }
+    assert(with_comments.length == 3)
+    assert(((with_comments.get(0) !? .{}).get("comments") !? sql.Value.null()).to_int() == 2)
+    assert(((with_comments.get(2) !? .{}).get("comments") !? sql.Value.null()).to_int() == 0)
+}
+
+test "A transaction without a closure, against a real database" {
+    let db = sqlite.database(memory() ! { assert(false) return })
+    defer db.close()
+    db.exec("CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)") ! { assert(false) return }
+    db.exec("INSERT INTO accounts (id, balance) VALUES (1, 100), (2, 0)") ! { assert(false) return }
+
+    // Work that commits
+    let tx = db.begin_transaction() ! { println(E.message) assert(false) return }
+    tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = 1", .{ sql.Value.of_int(40) }) ! { assert(false) return }
+    tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = 2", .{ sql.Value.of_int(40) }) ! { assert(false) return }
+    tx.commit() ! { assert(false) return }
+    assert((db.value("SELECT balance FROM accounts WHERE id = 1") ! { assert(false) return }).to_int() == 60)
+
+    // Work that is left without committing: `close` rolls it back
+    let abandoned = db.begin_transaction() ! { assert(false) return }
+    abandoned.exec("UPDATE accounts SET balance = 0 WHERE id = 1") ! { assert(false) return }
+    assert((abandoned.value("SELECT balance FROM accounts WHERE id = 1") ! { assert(false) return }).to_int() == 0)
+    abandoned.close()
+    assert((db.value("SELECT balance FROM accounts WHERE id = 1") ! { assert(false) return }).to_int() == 60)
+
+    // The builders work on a transaction as they do on a database
+    let third = db.begin_transaction() ! { assert(false) return }
+    third.insert_into("accounts").values(.{ "id" => sql.Value.of_int(3), "balance" => sql.Value.of_int(5) }).run() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert((third.select().from("accounts").count() ! { assert(false) return }) == 3)
+    third.rollback() ! { assert(false) return }
+    assert((db.select().from("accounts").count() ! { assert(false) return }) == 2)
+}
