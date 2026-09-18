@@ -218,3 +218,112 @@ test "A pool of real connections" {
     assert(pool.size == 0)
     remove_database(path)
 }
+
+// The names a query answered with, sorted, so a test can read as one line
+fn names_of(found: Array[Map[sql.Value]]) String {
+    let names: Array[String] = .{}
+    each found as row : names.append((row.get("name") !? sql.Value.null()).to_string())
+    names.sort()
+    return names.join(",")
+}
+
+test "Complex conditions against a real database" {
+    let db = sqlite.database(memory() ! { assert(false) return })
+    defer db.close()
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, role TEXT, score INTEGER, active INTEGER)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    // name, role, score, active
+    let rows = Array[Array[sql.Value]]{
+        .{ sql.Value.of("ada"),   sql.Value.of("admin"),  sql.Value.of_int(10),  sql.Value.of_bool(true) }
+        .{ sql.Value.of("bob"),   sql.Value.of("member"), sql.Value.of_int(150), sql.Value.of_bool(true) }
+        .{ sql.Value.of("cid"),   sql.Value.of("member"), sql.Value.of_int(20),  sql.Value.of_bool(true) }
+        .{ sql.Value.of("dora"),  sql.Value.of("admin"),  sql.Value.of_int(30),  sql.Value.of_bool(false) }
+        .{ sql.Value.of("eve"),   sql.Value.of("owner"),  sql.Value.null(),      sql.Value.of_bool(true) }
+        .{ sql.Value.of("frank"), sql.Value.of("owner"),  sql.Value.of_int(5),   sql.Value.of_bool(true) }
+    }
+    each rows as row {
+        db.exec("INSERT INTO users (name, role, score, active) VALUES (?, ?, ?, ?)", row) ! { assert(false) return }
+    }
+
+    // Active users who are either an admin or scored above 100.
+    // Without the group this would also return the inactive admin.
+    let found = db.select("name")
+        .from("users")
+        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where_group(fn(w: sql.Conditions) {
+            w.where("role = ?", .{ sql.Value.of("admin") })
+            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+        })
+        .all() ! { println(E.message) assert(false) return }
+    assert(names_of(found) == "ada,bob")
+
+    // The same conditions without the group: AND binds tighter, so dora comes along
+    let ungrouped = db.select("name")
+        .from("users")
+        .where("active = ? AND role = ? OR score > ?", .{ sql.Value.of_bool(true), sql.Value.of("admin"), sql.Value.of_int(100) })
+        .all() ! { assert(false) return }
+    assert(names_of(ungrouped) == "ada,bob")
+
+    // An OR of two ANDs, with a nested OR inside the second one:
+    // (admin AND active) OR (owner AND (score > 4 OR score IS NULL))
+    let either = db.select("name")
+        .from("users")
+        .where_group(fn(w: sql.Conditions) {
+            w.where("role = ?", .{ sql.Value.of("admin") })
+            w.where("active = ?", .{ sql.Value.of_bool(true) })
+        })
+        .or_where_group(fn(w: sql.Conditions) {
+            w.where("role = ?", .{ sql.Value.of("owner") })
+            w.group(fn(inner: sql.Conditions) {
+                inner.where("score > ?", .{ sql.Value.of_int(4) })
+                inner.or_where_null("score")
+            })
+        })
+        .order_by("name")
+        .all() ! { println(E.message) assert(false) return }
+    assert(names_of(either) == "ada,eve,frank")
+
+    // IN and NOT IN together with an OR
+    let lists = db.select("name")
+        .from("users")
+        .where_in("role", .{ sql.Value.of("admin"), sql.Value.of("owner") })
+        .where_not_in("name", .{ sql.Value.of("dora") })
+        .or_where("score > ?", .{ sql.Value.of_int(100) })
+        .all() ! { assert(false) return }
+    assert(names_of(lists) == "ada,bob,eve,frank")
+
+    // A count with a mixed condition, to check the values line up with their placeholders
+    let count = db.select("count(*) AS n")
+        .from("users")
+        .where_group(fn(w: sql.Conditions) {
+            w.where("score >= ?", .{ sql.Value.of_int(10) })
+            w.or_where_null("score")
+        })
+        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .value() ! { println(E.message) assert(false) return }
+    assert(count.to_int() == 4) // ada, bob, cid, eve
+
+    // HAVING mixes as well
+    let grouped = db.select("role, count(*) AS n")
+        .from("users")
+        .group_by("role")
+        .having("count(*) > ?", .{ sql.Value.of_int(2) })
+        .or_having("role = ?", .{ sql.Value.of("admin") })
+        .order_by("role")
+        .all() ! { println(E.message) assert(false) return }
+    assert(grouped.length == 1)
+    assert(((grouped.get(0) !? .{}).get("role") !? sql.Value.null()).to_string() == "admin")
+
+    // An UPDATE with an OR touches exactly the rows it should
+    let changed = db.update("users")
+        .set("active", sql.Value.of_bool(false))
+        .where("role = ?", .{ sql.Value.of("owner") })
+        .or_where("score < ?", .{ sql.Value.of_int(15) })
+        .run() ! { println(E.message) assert(false) return }
+    assert(changed == 3) // ada (10), eve and frank (owners)
+    assert((db.value("SELECT count(*) FROM users WHERE active = 1") ! { assert(false) return }).to_int() == 2)
+}
