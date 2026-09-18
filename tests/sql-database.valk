@@ -432,3 +432,58 @@ test "A transaction without a closure, against a real database" {
     third.rollback() ! { assert(false) return }
     assert((db.select().from("accounts").count() ! { assert(false) return }) == 2)
 }
+
+test "Chunking a real table" {
+    let db = sqlite.database(memory() ! { assert(false) return })
+    defer db.close()
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, checked INTEGER DEFAULT 0)") ! {
+        assert(false)
+        return
+    }
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 250 : db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("user " + i) }) ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+
+    // Pages of 100, the last one short
+    let pages: Array[uint] = .{}
+    let seen = db.select().from("users").order_by("id").chunk(100, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        pages.append(rows.length)
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(seen == 250)
+    assert(pages.length == 3)
+    assert((pages.get(2) !? 0) == 50)
+
+    // Walking by id, writing to every row as it goes: the writes would have ended a plain walk
+    let updated = db.select().from("users").chunk_by_id("id", 60, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        each rows as row {
+            db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+        }
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(updated == 250)
+    assert((db.value("SELECT count(*) FROM users WHERE checked = 1") ! { assert(false) return }).to_int() == 250)
+
+    // The conditions of the query are kept on every page
+    let checked = db.select().from("users").where("name LIKE ?", .{ sql.Value.of("user 1%") }).chunk_by_id("id", 25, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        return true
+    }) ! { println(E.message) assert(false) return }
+    // user 1, 10-19, 100-199: 111 of them
+    assert(checked == 111)
+
+    // Stopping early
+    let stopped = db.select().from("users").chunk_by_id("id", 10, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        return false
+    }) ! { assert(false) return }
+    assert(stopped == 10)
+
+    // One row at a time, without holding the result
+    let names: Array[String] = .{}
+    let walked = db.each_row("SELECT name FROM users ORDER BY id LIMIT 5", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+        names.append((row.get("name") !? sql.Value.null()).to_string())
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(walked == 5)
+    assert((names.get(0) !? "") == "user 1")
+}

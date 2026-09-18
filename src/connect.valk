@@ -122,6 +122,9 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
     /// How many prepared statements are kept. A query that is run again is prepared once and
     /// then reused while it stays in the cache.
     + statement_cache_size: uint (64)
+    /// Counts the statements that have run, so that the rows of a query can tell whether
+    /// another statement took the connection from under them.
+    ~+ query_serial: uint (0)
     /// How many statements were prepared on this connection. A query that hits the cache does
     /// not raise it, so this tells whether the cache is doing its work.
     ~+ statements_prepared: uint (0)

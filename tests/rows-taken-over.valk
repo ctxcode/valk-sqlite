@@ -1,0 +1,26 @@
+use sqlite
+use sql
+
+test "Rows that another statement took over" {
+    let db = sqlite.database(memory() ! { assert(false) return })
+    defer db.close()
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)") ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 10 : db.exec("INSERT INTO t (n) VALUES (?)", .{ sql.Value.of_int(i.to(int)) }) ! { assert(false) return }
+
+    let rows = db.query("SELECT id, n FROM t ORDER BY id") ! { assert(false) return }
+    let row: Map[sql.Value] = .{}
+    rows.next(row) ! { assert(false) return }
+    // A statement in the middle of the walk takes the connection
+    db.exec("UPDATE t SET n = n + 100 WHERE id = 9") ! { assert(false) return }
+
+    // Which the walk now says, instead of quietly stopping
+    rows.next(row) ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("another statement ran"))
+        assert(E.message.contains("chunk_by_id"))
+        rows.close()
+        return
+    }
+    assert(false)
+}

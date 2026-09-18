@@ -36,6 +36,7 @@ extend Connection {
         if this.closed : throw .closed { message: "The connection is closed" }
         this.stop()
         this.affected_rows = 0
+        this.query_serial++
         this.column_names.clear()
 
         if isset(binds) {

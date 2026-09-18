@@ -37,7 +37,7 @@ class SqlDriver is sql.Driver {
 
     + fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
         this.run_statement(statement, args) !>
-        return SqlRows { con: this.con }
+        return SqlRows { con: this.con, serial: this.con.query_serial }
     }
 
     fn run_statement(statement: String, args: Array[sql.Value]) !sql.Error {
@@ -91,15 +91,24 @@ class SqlDriver is sql.Driver {
 // package's own values first: a row then costs one map instead of two.
 class SqlRows is sql.Rows {
     con: Connection
+    // The statement these rows belong to. A connection runs one statement at a time, so a
+    // second one leaves these rows with nothing to read, which is worth saying out loud.
+    serial: uint (0)
 
     + fn next(row: Map[sql.Value]) bool !sql.Error {
         let con = this.con
+        if con.query_serial != this.serial {
+            throw .error {
+                message: "These rows were dropped because another statement ran on the same connection. Read them to the end first, or walk the query with chunk_by_id, which leaves the connection free between pages."
+            }
+        }
         return translate_value[bool]("", fn() bool !Error {
             return con.fetch_sql_row(row) !>
         }) !>
     }
 
     + fn close() {
+        if this.con.query_serial != this.serial : return
         this.con.stop()
     }
 }

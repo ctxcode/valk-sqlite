@@ -10,8 +10,8 @@
         "sql": {
             "src": "github.com/ctxcode/valk-sql",
             "version": "0.2.x",
-            "current": "0.2.1",
-            "current_hash": "2a3e4b7f7f5f3c5003de9cc99bfdba8cee3ecb1f"
+            "current": "0.2.2",
+            "current_hash": "dc6c9293a27fa365a879ce52fef43e2e8ba7ce45"
         }
     }
 }
