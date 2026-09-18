@@ -168,6 +168,8 @@ Takes one row into the result.
     ~+ last_insert_id: int
     // The path the database was opened with.
     + path: String
+    // Counts the statements that have run, so that the rows of a query can tell whether another statement took the connection from under them.
+    ~+ query_serial: uint
     // How many prepared statements are kept. A query that is run again is prepared once and then reused while it stays in the cache.
     + statement_cache_size: uint
     // How many statements were prepared on this connection. A query that hits the cache does not raise it, so this tells whether the cache is doing its work.
@@ -270,6 +272,11 @@ The rowid the last `INSERT` on this connection wrote.
 #### path
 
 The path the database was opened with.
+
+#### query_serial
+
+Counts the statements that have run, so that the rows of a query can tell whether
+another statement took the connection from under them.
 
 #### statement_cache_size
 
