@@ -1,0 +1,179 @@
+use sqlite
+
+test "Basics" {
+    let db = memory() ! { println(E.message) assert(false) return }
+    defer db.close()
+    assert(sqlite.version().length > 0)
+
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    // Insert with named values
+    let changed = db.run("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(changed == 1)
+    assert(db.last_insert_id == 1)
+
+    db.run("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Bob", "age" => 20 }) ! { assert(false) return }
+    assert(db.last_insert_id == 2)
+
+    // Select
+    db.query("SELECT * FROM users WHERE age > :age ORDER BY id", .{ "age" => 18 }) ! { assert(false) return }
+    let rows = db.fetch_all() ! { assert(false) return }
+    assert(rows.length == 2)
+    assert(db.affected_rows == 2)
+    let first = rows.get(0) ! { assert(false) return }
+    assert((first["name"] ?? sqlite.Value.null()).to_string() == "Ada")
+    assert((first["age"] ?? sqlite.Value.null()).to_int() == 36)
+    assert((first["id"] ?? sqlite.Value.null()).to_int() == 1)
+
+    // Column names of the last query
+    assert(db.column_names.length == 3)
+    assert((db.column_names.get(1) !? "") == "name")
+
+    // One row at a time, into the same map
+    db.query("SELECT name FROM users ORDER BY name DESC") ! { assert(false) return }
+    let row: Map[sqlite.Value] = .{}
+    let names: Array[String] = .{}
+    while db.fetch_row(row) ! { assert(false) return } {
+        names.append((row["name"] ?? sqlite.Value.null()).to_string())
+    }
+    assert(names.length == 2)
+    assert((names.get(0) !? "") == "Bob")
+
+    // One value
+    assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).to_int() == 2)
+    assert((db.value("SELECT name FROM users WHERE id = :id", .{ "id" => 2 }) ! { assert(false) return }).to_string() == "Bob")
+    // A query that finds nothing answers with NULL
+    assert((db.value("SELECT name FROM users WHERE id = 99") ! { assert(false) return }).is_null())
+
+    // Update and delete report what they changed
+    assert((db.run("UPDATE users SET age = age + 1") ! { assert(false) return }) == 2)
+    assert((db.run("DELETE FROM users WHERE name = :name", .{ "name" => "Bob" }) ! { assert(false) return }) == 1)
+    assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).to_int() == 1)
+
+    // select() is query + fetch_all
+    let left = db.select("SELECT * FROM users") ! { assert(false) return }
+    assert(left.length == 1)
+}
+
+test "Placeholders" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (a TEXT, b TEXT)") ! { assert(false) return }
+
+    // Nameless placeholders take the values bound with bindv, in order
+    db.bindv("one")
+    db.bindv("two")
+    db.run("INSERT INTO t (a, b) VALUES (?, ?)") ! { println(E.message) assert(false) return }
+    let row = db.select("SELECT * FROM t") ! { assert(false) return }
+    let first = row.get(0) ! { assert(false) return }
+    assert((first["a"] ?? sqlite.Value.null()).to_string() == "one")
+    assert((first["b"] ?? sqlite.Value.null()).to_string() == "two")
+
+    // Binds set earlier are used by the next query
+    db.bind("a", "three")
+    db.bind("b", "four")
+    db.run("INSERT INTO t (a, b) VALUES (:a, :b)") ! { assert(false) return }
+    assert((db.value("SELECT count(*) FROM t WHERE a = 'three'") ! { assert(false) return }).to_int() == 1)
+
+    // @name and $name are the other SQLite spellings of the same thing
+    db.run("INSERT INTO t (a, b) VALUES (@a, $b)", .{ "a" => "five", "b" => "six" }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert((db.value("SELECT b FROM t WHERE a = 'five'") ! { assert(false) return }).to_string() == "six")
+
+    // A name the statement does not use is ignored, so shared binds do no harm
+    db.run("INSERT INTO t (a) VALUES (:a)", .{ "a" => "seven", "unused" => "x" }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 4)
+
+    // Values are bound, never pasted into the SQL
+    db.run("INSERT INTO t (a) VALUES (:a)", .{ "a" => "'; DROP TABLE t; --" }) ! { assert(false) return }
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 5)
+}
+
+test "Types" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (i INTEGER, f REAL, s TEXT, b BLOB, n TEXT)") ! { assert(false) return }
+
+    let blob = "\x00\x01\x02binary\xff"
+    db.run("INSERT INTO t VALUES (:i, :f, :s, :b, :n)", .{
+        "i" => -42
+        "f" => 1.5
+        "s" => "text"
+        "b" => sqlite.Value.of_blob(blob)
+        "n" => null
+    }) ! { println(E.message) assert(false) return }
+
+    let rows = db.select("SELECT * FROM t") ! { assert(false) return }
+    let row = rows.get(0) ! { assert(false) return }
+
+    let i = row["i"] ?? sqlite.Value.null()
+    assert(i.type == sqlite.TYPE.int)
+    assert(i.to_int() == -42)
+    assert(i.to_string() == "-42")
+    assert(i.to_bool())
+
+    let f = row["f"] ?? sqlite.Value.null()
+    assert(f.type == sqlite.TYPE.float)
+    assert(f.to_float() == 1.5)
+
+    let s = row["s"] ?? sqlite.Value.null()
+    assert(s.type == sqlite.TYPE.string)
+    assert(s.to_string() == "text")
+
+    let b = row["b"] ?? sqlite.Value.null()
+    assert(b.is_blob())
+    assert(b.to_string() == blob) // every byte, zero bytes included
+    assert(b.to_string().length == 10)
+
+    let n = row["n"] ?? sqlite.Value.of("x")
+    assert(n.is_null())
+    assert(!isset(n.to_string_or_null()))
+    assert(n.to_int() == 0)
+
+    // A bool is stored as 1 and 0
+    db.run("INSERT INTO t (i) VALUES (:i)", .{ "i" => true }) ! { assert(false) return }
+    assert((db.value("SELECT i FROM t WHERE i = 1") ! { assert(false) return }).to_bool())
+
+    // JSON goes in as text and comes back parsed
+    db.run("INSERT INTO t (s) VALUES (:s)", .{ "s" => "{\"a\":[1,2]}" }) ! { assert(false) return }
+    let document = (db.value("SELECT s FROM t WHERE s LIKE '{%'") ! { assert(false) return }).to_json()
+    assert(document["a"][1].int == 2)
+}
+
+test "Placeholder lists" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)") ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 5 : db.run("INSERT INTO users (name) VALUES (:name)", .{ "name" => "user " + i }) ! { assert(false) return }
+
+    assert(sqlite.placeholders(0) == "")
+    assert(sqlite.placeholders(1) == "?")
+    assert(sqlite.placeholders(3) == "?, ?, ?")
+
+    let ids = Array[uint]{ 2, 4 }
+    each ids as id : db.bindv(id)
+    let rows = db.select("SELECT name FROM users WHERE id IN (" + sqlite.placeholders(ids.length) + ") ORDER BY id") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(rows.length == 2)
+    assert((rows.get(0) ! { assert(false) return }["name"] ?? sqlite.Value.null()).to_string() == "user 2")
+    assert((rows.get(1) ! { assert(false) return }["name"] ?? sqlite.Value.null()).to_string() == "user 4")
+}

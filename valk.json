@@ -1,0 +1,9 @@
+{
+    "name": "sqlite",
+    "use": "0.7.2",
+    "require": {
+        "valk": {
+            "min": "0.7.2"
+        }
+    }
+}

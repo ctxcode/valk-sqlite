@@ -1,0 +1,41 @@
+extend Connection {
+
+    /// Copies the whole database into a file, while other connections keep using it.
+    ///
+    /// This is SQLite's online backup: copying the file with `fs.copy` while a write is going
+    /// on can give a damaged copy, and this cannot. An existing file at `path` is overwritten.
+    ///
+    /// ```valk
+    /// db.backup_to("backup-" + time.DateTime.now().format("Y-m-d") + ".db") ! panic("%{E.message}")
+    /// ```
+    + fn backup_to(path: String) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+
+        let target: ?DB = null
+        let flags: i32 = SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        let code = sqlite3_open_v2(path.data_cstring, @ref(target), flags, null)
+        if !isset(target) : throw .open { message: "Cannot open '" + path + "' to back up into" }
+        if code != SQLITE_OK {
+            let message: String = sqlite3_errmsg(target)
+            sqlite3_close_v2(target)
+            throw .open { message: "Cannot open '" + path + "' to back up into: " + message, result_code: code.to(int) }
+        }
+
+        let backup = sqlite3_backup_init(target, "main".data_cstring, this.db, "main".data_cstring)
+        if !isset(backup) {
+            let message: String = sqlite3_errmsg(target)
+            sqlite3_close_v2(target)
+            throw .error { message: "Cannot start the backup: " + message }
+        }
+        // -1 copies every page in one step
+        let step = sqlite3_backup_step(backup, -1)
+        sqlite3_backup_finish(backup)
+        if step != SQLITE_DONE {
+            let message: String = sqlite3_errmsg(target)
+            sqlite3_close_v2(target)
+            throw .error { message: "The backup failed: " + message, result_code: step.to(int) }
+        }
+        sqlite3_close_v2(target)
+    }
+}

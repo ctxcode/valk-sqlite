@@ -1,0 +1,279 @@
+use valk.fs
+
+/// How SQLite keeps the rollback journal, which decides how readers and writers get along.
++ enum Journal {
+    /// The write-ahead log: readers and one writer work at the same time. This is what a
+    /// program that serves several requests wants, and it is the default. It leaves a `-wal`
+    /// and a `-shm` file next to the database.
+    wal
+    /// The default of SQLite itself: a rollback journal file per transaction, and writers keep
+    /// readers out.
+    delete
+    /// Like `delete`, but the journal file is emptied instead of removed.
+    truncate
+    /// Like `delete`, but the journal file is kept and overwritten.
+    persist
+    /// The journal is kept in memory. Faster, and a crash in the middle of a transaction can
+    /// leave the database damaged.
+    memory
+    /// No journal at all. A crash during a write damages the database.
+    off
+    /// Whatever the database already uses.
+    keep
+}
+
+/// The settings a database is opened with.
++ class OpenOptions {
+    /// Opens the database for reading only. Writing then throws `readonly`.
+    + read_only: bool (false)
+    /// Creates the database when the file does not exist yet.
+    + create: bool (true)
+    /// How long a statement waits for another connection to let go of the database, in
+    /// milliseconds, before it throws `busy`.
+    + busy_timeout_ms: uint (5000)
+    /// Whether foreign keys are enforced. SQLite leaves them off; this package turns them on,
+    /// since a foreign key that is not enforced is usually a surprise.
+    + foreign_keys: bool (true)
+    /// The journal mode to set. Left alone for a database in memory.
+    + journal: Journal (Journal.wal)
+    /// Whether the path may be a `file:` URI with settings of its own.
+    + uri: bool (false)
+}
+
+/// Opens a database file, creating it when it does not exist.
+///
+/// The directories above it are not created. `:memory:` opens a database that lives in memory
+/// and disappears with the connection; `open_memory` says that more clearly.
+///
+/// ```valk
+/// let db = sqlite.open("app.db") ! panic("Cannot open: %{E.message}")
+/// defer db.close()
+/// ```
++ fn open(path: String, options: OpenOptions (.{})) Connection !Error {
+    return open_database(path, options) !>
+}
+
+/// Opens a database that lives in memory and disappears when the connection closes.
+///
+/// Every connection gets its own: two of them never see the same data.
++ fn open_memory(options: OpenOptions (.{})) Connection !Error {
+    return open_database(":memory:", options) !>
+}
+
+/// The SQLite version the program is linked against, such as `3.45.1`.
++ fn version() String {
+    return sqlite3_libversion()
+}
+
+fn open_database(path: String, options: OpenOptions) Connection !Error {
+    @unsafe
+    let flags: i32 = SQLITE_OPEN_NOMUTEX
+    if options.read_only : flags |= SQLITE_OPEN_READONLY
+    else {
+        flags |= SQLITE_OPEN_READWRITE
+        if options.create : flags |= SQLITE_OPEN_CREATE
+    }
+    if options.uri : flags |= SQLITE_OPEN_URI
+
+    let handle: ?DB = null
+    let code = sqlite3_open_v2(path.data_cstring, @ref(handle), flags, null)
+    if !isset(handle) {
+        throw .open { message: "Cannot open '" + path + "': out of memory", result_code: code.to(int) }
+    }
+    if code != SQLITE_OK {
+        let message: String = sqlite3_errmsg(handle)
+        sqlite3_close_v2(handle)
+        throw .open { message: "Cannot open '" + path + "': " + message, result_code: code.to(int) }
+    }
+    sqlite3_extended_result_codes(handle, 1)
+
+    let con = Connection {
+        db: handle
+        path: path
+        in_memory: path == ":memory:" || path.starts_with("file::memory:")
+    }
+    con.init(options) ! {
+        con.close()
+        throw E
+    }
+    return con
+}
+
+/// One connection to one database.
+///
+/// SQLite runs in the program itself, so a call does its work on the calling thread and blocks
+/// it, coroutines included, until it is done. A connection belongs to one thread; give every
+/// thread its own.
++ class Connection {
+    db: DB
+    /// The path the database was opened with.
+    + path: String
+    /// Whether the database lives in memory.
+    + in_memory: bool (false)
+    /// Whether the connection was closed.
+    ~ closed: bool (false)
+    /// Rows changed by the last `INSERT`, `UPDATE` or `DELETE`; for a `SELECT` the number of
+    /// rows that were read, known once every row has been fetched.
+    ~+ affected_rows: uint (0)
+    /// The rowid the last `INSERT` on this connection wrote.
+    ~+ last_insert_id: int (0)
+    /// The column names of the running query, in order.
+    ~+ column_names: Array[String] (.{})
+    /// How many prepared statements are kept. A query that is run again is prepared once and
+    /// then reused while it stays in the cache.
+    + statement_cache_size: uint (64)
+    /// How many statements were prepared on this connection. A query that hits the cache does
+    /// not raise it, so this tells whether the cache is doing its work.
+    ~+ statements_prepared: uint (0)
+    /// Prints every statement before it runs.
+    + debug: bool (false)
+    //
+    statements: Map[Statement] (.{})
+    order: Array[String] (.{}) // Cache keys, least recently used first
+    current: ?Statement (null)
+    state: uint (STATE_IDLE)
+    binds: Array[Value] (.{})
+    named_binds: Map[Value] (.{})
+
+    fn init(options: OpenOptions) !Error {
+        @unsafe
+        if options.busy_timeout_ms > 0 : sqlite3_busy_timeout(this.db, options.busy_timeout_ms.to(i32))
+        if options.foreign_keys : this.exec("PRAGMA foreign_keys = ON") !>
+        if !this.in_memory && options.journal != Journal.keep {
+            this.exec("PRAGMA journal_mode = " + journal_name(options.journal)) !>
+        }
+    }
+
+    /// Runs one or more statements and reads no rows, for schema changes and scripts.
+    ///
+    /// The statements are separated by `;`. Placeholders cannot be used here; `query` is for
+    /// statements with values in them.
+    + fn exec(sql: String) !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        this.stop()
+        if this.debug : println("EXEC: " + sql)
+        @unsafe
+        let rest = sql
+        while true {
+            rest = rest.trim(" \t\r\n")
+            if rest.length == 0 : return
+            let stmt: ?STMT = null
+            let tail: ?ptr = null
+            let code = sqlite3_prepare_v2(this.db, rest.data, rest.length.to(i32), @ref(stmt), @ref(tail))
+            if code != SQLITE_OK : this.fail(code, rest)
+            if !isset(stmt) : return // Only whitespace or a comment was left
+            let step = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            if step != SQLITE_DONE && step != SQLITE_ROW : this.fail(step, rest)
+            this.read_counters()
+            // Continue with what follows this statement
+            if !isset(tail) : return
+            let used = tail.@cast(uint) - rest.data.@cast(uint)
+            if used >= rest.length : return
+            rest = rest.range(used, rest.length - used)
+        }
+    }
+
+    /// Returns whether a transaction is open.
+    + fn in_transaction() bool {
+        @unsafe
+        if this.closed : return false
+        return sqlite3_get_autocommit(this.db) == 0
+    }
+
+    /// Returns whether the database can only be read.
+    + fn is_read_only() bool {
+        @unsafe
+        if this.closed : return true
+        return sqlite3_db_readonly(this.db, "main".data_cstring) == 1
+    }
+
+    /// Stops the query that is running on this connection from another thread.
+    ///
+    /// The call that is waiting throws `interrupted`. Nothing else uses it, since a statement
+    /// blocks the thread that runs it.
+    + fn interrupt() {
+        @unsafe
+        if this.closed : return
+        sqlite3_interrupt(this.db)
+    }
+
+    /// Runs `PRAGMA name = value`, for a setting this package has no option for.
+    + fn set_pragma(name: String, value: String) !Error {
+        this.exec("PRAGMA " + name + " = " + value) !>
+    }
+    /// Returns the value of `PRAGMA name`, or "" when it has none.
+    + fn get_pragma(name: String) String !Error {
+        this.query("PRAGMA " + name) !>
+        let value = this.fetch_value() !>
+        return value.to_string()
+    }
+
+    /// Closes the connection and releases every prepared statement. Further calls throw
+    /// `closed`.
+    + fn close() {
+        @unsafe
+        if this.closed : return
+        this.closed = true
+        this.stop()
+        each this.statements as statement {
+            statement.finalize()
+        }
+        this.statements.clear()
+        this.order.clear()
+        this.current = null
+        sqlite3_close_v2(this.db)
+    }
+
+    // Stops the running query, so that the next one starts clean
+    fn stop() {
+        let current = this.current
+        if isset(current) {
+            current.reset()
+            this.current = null
+        }
+        this.state = STATE_IDLE
+    }
+
+    fn read_counters() {
+        @unsafe
+        this.affected_rows = sqlite3_changes(this.db).to(uint)
+        this.last_insert_id = sqlite3_last_insert_rowid(this.db).to(int)
+    }
+
+    // Turns a SQLite result code into a thrown error
+    fn fail(code: i32, sql: String) !Error $throw {
+        @unsafe
+        let message: String = sqlite3_errmsg(this.db)
+        let result = code.to(int)
+        let base = code & 0xff
+        if base == SQLITE_BUSY || base == SQLITE_LOCKED {
+            throw .busy { message: message, result_code: result, sql: sql }
+        }
+        if base == SQLITE_CONSTRAINT {
+            throw .constraint { message: message, result_code: result, sql: sql }
+        }
+        if base == SQLITE_READONLY || base == SQLITE_PERM || base == SQLITE_AUTH {
+            throw .readonly { message: message, result_code: result, sql: sql }
+        }
+        if base == SQLITE_CORRUPT || base == SQLITE_NOTADB {
+            throw .corrupt { message: message, result_code: result, sql: sql }
+        }
+        if base == SQLITE_INTERRUPT {
+            throw .interrupted { message: message, result_code: result, sql: sql }
+        }
+        if base == SQLITE_ERROR || base == SQLITE_RANGE || base == SQLITE_MISMATCH {
+            throw .syntax { message: message, result_code: result, sql: sql }
+        }
+        throw .error { message: message, result_code: result, sql: sql }
+    }
+}
+
+fn journal_name(journal: Journal) String {
+    if journal == Journal.wal : return "WAL"
+    if journal == Journal.delete : return "DELETE"
+    if journal == Journal.truncate : return "TRUNCATE"
+    if journal == Journal.persist : return "PERSIST"
+    if journal == Journal.memory : return "MEMORY"
+    return "OFF"
+}

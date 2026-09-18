@@ -1,0 +1,102 @@
+// Bindings for the C library. Everything here is internal; the package wraps it.
+
+link "sqlite3"
+
+pointer DB {}
+pointer STMT {}
+pointer BACKUP {}
+
+// Result codes
+value SQLITE_OK (0)
+value SQLITE_ERROR (1)
+value SQLITE_PERM (3)
+value SQLITE_ABORT (4)
+value SQLITE_BUSY (5)
+value SQLITE_LOCKED (6)
+value SQLITE_NOMEM (7)
+value SQLITE_READONLY (8)
+value SQLITE_INTERRUPT (9)
+value SQLITE_IOERR (10)
+value SQLITE_CORRUPT (11)
+value SQLITE_NOTFOUND (12)
+value SQLITE_FULL (13)
+value SQLITE_CANTOPEN (14)
+value SQLITE_SCHEMA (17)
+value SQLITE_TOOBIG (18)
+value SQLITE_CONSTRAINT (19)
+value SQLITE_MISMATCH (20)
+value SQLITE_MISUSE (21)
+value SQLITE_AUTH (23)
+value SQLITE_RANGE (25)
+value SQLITE_NOTADB (26)
+value SQLITE_ROW (100)
+value SQLITE_DONE (101)
+
+// Open flags
+value SQLITE_OPEN_READONLY (0x00000001)
+value SQLITE_OPEN_READWRITE (0x00000002)
+value SQLITE_OPEN_CREATE (0x00000004)
+value SQLITE_OPEN_URI (0x00000040)
+value SQLITE_OPEN_MEMORY (0x00000080)
+value SQLITE_OPEN_NOMUTEX (0x00008000)
+value SQLITE_OPEN_FULLMUTEX (0x00010000)
+
+// Column types
+value SQLITE_INTEGER (1)
+value SQLITE_FLOAT (2)
+value SQLITE3_TEXT (3)
+value SQLITE_BLOB (4)
+value SQLITE_NULL (5)
+
+// Tells sqlite to copy the bytes that are bound, since the buffer may be gone by the time the
+// statement runs
+fn sqlite_transient() ptr {
+    return uint.$max.@cast(ptr)
+}
+
+extern fn sqlite3_libversion() cstring;
+extern fn sqlite3_open_v2(filename: cstring, db_out: *?DB, flags: i32, vfs: ?ptr) i32;
+extern fn sqlite3_close_v2(db: DB) i32;
+extern fn sqlite3_errmsg(db: DB) cstring;
+extern fn sqlite3_errstr(code: i32) cstring;
+extern fn sqlite3_extended_errcode(db: DB) i32;
+extern fn sqlite3_extended_result_codes(db: DB, on: i32) i32;
+extern fn sqlite3_busy_timeout(db: DB, ms: i32) i32;
+extern fn sqlite3_interrupt(db: DB);
+extern fn sqlite3_changes(db: DB) i32;
+extern fn sqlite3_total_changes(db: DB) i32;
+extern fn sqlite3_last_insert_rowid(db: DB) i64;
+extern fn sqlite3_get_autocommit(db: DB) i32;
+extern fn sqlite3_db_readonly(db: DB, name: cstring) i32;
+
+extern fn sqlite3_prepare_v2(db: DB, sql: ptr, bytes: i32, stmt_out: *?STMT, tail_out: ?*?ptr) i32;
+extern fn sqlite3_finalize(stmt: STMT) i32;
+extern fn sqlite3_reset(stmt: STMT) i32;
+extern fn sqlite3_clear_bindings(stmt: STMT) i32;
+extern fn sqlite3_step(stmt: STMT) i32;
+extern fn sqlite3_sql(stmt: STMT) cstring;
+
+extern fn sqlite3_bind_parameter_count(stmt: STMT) i32;
+extern fn sqlite3_bind_parameter_index(stmt: STMT, name: cstring) i32;
+extern fn sqlite3_bind_parameter_name(stmt: STMT, index: i32) ?cstring;
+extern fn sqlite3_bind_null(stmt: STMT, index: i32) i32;
+extern fn sqlite3_bind_int64(stmt: STMT, index: i32, value: i64) i32;
+extern fn sqlite3_bind_double(stmt: STMT, index: i32, value: f64) i32;
+extern fn sqlite3_bind_text64(stmt: STMT, index: i32, text: ptr, bytes: u64, free: ?ptr, encoding: u8) i32;
+extern fn sqlite3_bind_blob64(stmt: STMT, index: i32, data: ptr, bytes: u64, free: ?ptr) i32;
+
+extern fn sqlite3_column_count(stmt: STMT) i32;
+extern fn sqlite3_column_name(stmt: STMT, index: i32) ?cstring;
+extern fn sqlite3_column_decltype(stmt: STMT, index: i32) ?cstring;
+extern fn sqlite3_column_type(stmt: STMT, index: i32) i32;
+extern fn sqlite3_column_int64(stmt: STMT, index: i32) i64;
+extern fn sqlite3_column_double(stmt: STMT, index: i32) f64;
+extern fn sqlite3_column_text(stmt: STMT, index: i32) ?ptr;
+extern fn sqlite3_column_blob(stmt: STMT, index: i32) ?ptr;
+extern fn sqlite3_column_bytes(stmt: STMT, index: i32) i32;
+
+extern fn sqlite3_backup_init(dest: DB, dest_name: cstring, source: DB, source_name: cstring) ?BACKUP;
+extern fn sqlite3_backup_step(backup: BACKUP, pages: i32) i32;
+extern fn sqlite3_backup_finish(backup: BACKUP) i32;
+extern fn sqlite3_backup_remaining(backup: BACKUP) i32;
+extern fn sqlite3_backup_pagecount(backup: BACKUP) i32;

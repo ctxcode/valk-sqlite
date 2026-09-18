@@ -1,0 +1,20 @@
+/// Thrown by every operation of this package.
+///
+/// - `open`: the database file could not be opened or created.
+/// - `syntax`: the SQL could not be prepared: a typo, an unknown table or column, or a
+///   placeholder that was not bound.
+/// - `constraint`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken.
+/// - `busy`: another connection held the database for longer than the busy timeout.
+/// - `readonly`: the database was opened read-only, or the file cannot be written.
+/// - `corrupt`: the file is not a database, or it is damaged.
+/// - `interrupted`: `interrupt` was called from another thread while the query ran.
+/// - `error`: any other answer from SQLite.
+/// - `closed`: the connection is closed.
+///
+/// `result_code` holds the SQLite result code, extended where SQLite has one, so a caller that needs
+/// the exact reason can look it up; `message` is the text SQLite gave.
++ error Error (open, syntax, constraint, busy, readonly, corrupt, interrupted, error, closed) payload {
+    message: String
+    result_code: int (0)
+    sql: String ("")
+}

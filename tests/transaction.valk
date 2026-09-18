@@ -1,0 +1,53 @@
+use sqlite
+
+test "Transactions" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (a TEXT)") ! { assert(false) return }
+    assert(!db.in_transaction())
+
+    // Committed work stays
+    db.begin() ! { assert(false) return }
+    assert(db.in_transaction())
+    db.run("INSERT INTO t VALUES ('one')") ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+    assert(!db.in_transaction())
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 1)
+
+    // Rolled back work is gone
+    db.begin() ! { assert(false) return }
+    db.run("INSERT INTO t VALUES ('two')") ! { assert(false) return }
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 2)
+    db.rollback() ! { assert(false) return }
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 1)
+
+    // Savepoints roll back a part of a transaction
+    db.begin() ! { assert(false) return }
+    db.run("INSERT INTO t VALUES ('three')") ! { assert(false) return }
+    db.savepoint("risky") ! { assert(false) return }
+    db.run("INSERT INTO t VALUES ('four')") ! { assert(false) return }
+    db.rollback_to("risky") ! { assert(false) return }
+    db.release("risky") ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+    let rows = db.select("SELECT a FROM t ORDER BY a") ! { assert(false) return }
+    assert(rows.length == 2)
+    assert((rows.get(1) ! { assert(false) return }["a"] ?? sqlite.Value.null()).to_string() == "three")
+}
+
+test "A transaction makes many writes fast" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER)") ! { assert(false) return }
+
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 2000 {
+        db.run("INSERT INTO t VALUES (:n)", .{ "n" => i }) ! { assert(false) return }
+    }
+    db.commit() ! { assert(false) return }
+
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 2000)
+    assert((db.value("SELECT sum(n) FROM t") ! { assert(false) return }).to_int() == 2001000)
+    // The same statement was prepared once, not 2000 times
+    assert(db.statements_prepared < 10)
+}

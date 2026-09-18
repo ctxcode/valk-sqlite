@@ -1,0 +1,112 @@
+use sqlite
+use valk.fs
+
+test "Files and WAL" {
+    let path = temp_path("files")
+    let db = sqlite.open(path) ! { println(E.message) assert(false) return }
+    assert(fs.exists(path))
+    assert(!db.in_memory)
+    assert(!db.is_read_only())
+
+    // WAL is the default, so readers and a writer can work at the same time
+    assert((db.get_pragma("journal_mode") !? "").lower() == "wal")
+    // Foreign keys are on, which SQLite itself leaves off
+    assert((db.get_pragma("foreign_keys") !? "") == "1")
+
+    db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)") ! { assert(false) return }
+    db.run("INSERT INTO notes (body) VALUES (:body)", .{ "body" => "written" }) ! { assert(false) return }
+    db.close()
+
+    // What was written is there after reopening
+    let again = sqlite.open(path) ! { assert(false) return }
+    assert((again.value("SELECT body FROM notes") ! { assert(false) return }).to_string() == "written")
+    again.close()
+
+    // Two connections see each other's writes
+    let one = sqlite.open(path) ! { assert(false) return }
+    let two = sqlite.open(path) ! { assert(false) return }
+    one.run("INSERT INTO notes (body) VALUES ('from one')") ! { assert(false) return }
+    assert((two.value("SELECT count(*) FROM notes") ! { assert(false) return }).to_int() == 2)
+    one.close()
+    two.close()
+
+    remove_database(path)
+}
+
+test "Read only" {
+    let path = temp_path("readonly")
+    let writer = sqlite.open(path) ! { assert(false) return }
+    writer.exec("CREATE TABLE t (a TEXT)") ! { assert(false) return }
+    writer.run("INSERT INTO t VALUES ('x')") ! { assert(false) return }
+    writer.close()
+
+    let reader = sqlite.open(path, .{ read_only: true }) ! { println(E.message) assert(false) return }
+    defer reader.close()
+    assert(reader.is_read_only())
+    assert((reader.value("SELECT a FROM t") ! { assert(false) return }).to_string() == "x")
+
+    reader.run("INSERT INTO t VALUES ('y')") ! {
+        assert(error_is(E.code, readonly))
+        remove_database(path)
+        return
+    }
+    assert(false)
+}
+
+test "Missing file" {
+    let path = temp_path("missing")
+    // Without `create` an absent file is an error instead of a new database
+    sqlite.open(path, .{ create: false }) ! {
+        assert(error_is(E.code, open))
+        assert(!fs.exists(path))
+        return
+    }
+    assert(false)
+}
+
+test "Busy database" {
+    let path = temp_path("busy")
+    let first = sqlite.open(path) ! { assert(false) return }
+    first.exec("CREATE TABLE t (a TEXT)") ! { assert(false) return }
+
+    // A second connection that gives up quickly instead of waiting five seconds
+    let second = sqlite.open(path, .{ busy_timeout_ms: 100 }) ! { assert(false) return }
+
+    first.begin(true) ! { assert(false) return } // holds the write lock
+    first.run("INSERT INTO t VALUES ('one')") ! { assert(false) return }
+
+    second.run("INSERT INTO t VALUES ('two')") ! {
+        assert(error_is(E.code, busy))
+        assert(E.result_code > 0)
+        first.commit() ! { assert(false) return }
+        // Once the first one commits, the second gets through
+        second.run("INSERT INTO t VALUES ('two')") ! { println(E.message) assert(false) return }
+        assert((second.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 2)
+        first.close()
+        second.close()
+        remove_database(path)
+        return
+    }
+    assert(false)
+}
+
+test "Backup" {
+    let path = temp_path("backup-source")
+    let copy_path = temp_path("backup-copy")
+    let db = sqlite.open(path) ! { assert(false) return }
+    db.exec("CREATE TABLE t (a TEXT)") ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 100 : db.run("INSERT INTO t VALUES (:a)", .{ "a" => "row " + i }) ! { assert(false) return }
+
+    db.backup_to(copy_path) ! { println(E.message) assert(false) return }
+    assert(fs.exists(copy_path))
+    db.close()
+
+    let copy = sqlite.open(copy_path, .{ create: false }) ! { println(E.message) assert(false) return }
+    assert((copy.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 100)
+    assert((copy.value("SELECT a FROM t WHERE rowid = 7") ! { assert(false) return }).to_string() == "row 7")
+    copy.close()
+
+    remove_database(path)
+    remove_database(copy_path)
+}

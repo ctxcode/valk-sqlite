@@ -1,0 +1,22 @@
+use sqlite
+use valk.fs
+
+// A file database of its own per test, under tests/tmp
+fn temp_path(name: String) String {
+    let dir = __DIR__ + "/tmp"
+    if !fs.exists(dir) : fs.create_dir(dir) _
+    let path = dir + "/" + name + ".db"
+    remove_database(path)
+    return path
+}
+
+fn remove_database(path: String) {
+    fs.delete_file(path) _
+    fs.delete_file(path + "-wal") _
+    fs.delete_file(path + "-shm") _
+    fs.delete_file(path + "-journal") _
+}
+
+fn memory() sqlite.Connection !sqlite.Error {
+    return sqlite.open_memory() !>
+}

@@ -1,0 +1,4 @@
+debug
+example/vendor
+tests/tmp
+example/tasks.db*

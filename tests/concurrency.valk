@@ -1,0 +1,93 @@
+use sqlite
+use valk.thread
+use valk.time
+
+test "Large values" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (name TEXT, data BLOB)") ! { assert(false) return }
+
+    // A blob of a megabyte, with every byte value in it
+    let buffer = ByteBuffer.new(1024 * 1024)
+    let i: uint = 0
+    while i++ < 1024 * 1024 : buffer.write_byte((i % 256).to(u8))
+    let blob = buffer.to_string()
+
+    db.run("INSERT INTO t VALUES (:name, :data)", .{ "name" => "big", "data" => sqlite.Value.of_blob(blob) }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    let back = db.value("SELECT data FROM t WHERE name = 'big'") ! { assert(false) return }
+    assert(back.is_blob())
+    assert(back.to_string().length == blob.length)
+    assert(back.to_string() == blob)
+
+    // Text with characters outside ASCII survives as it is
+    let text = "héllo wörld — ünïcode ✅"
+    db.run("INSERT INTO t VALUES (:name, NULL)", .{ "name" => text }) ! { assert(false) return }
+    assert((db.value("SELECT name FROM t WHERE name <> 'big'") ! { assert(false) return }).to_string() == text)
+}
+
+test "Many rows" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER, s TEXT)") ! { assert(false) return }
+
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 10000 {
+        db.run("INSERT INTO t VALUES (:n, :s)", .{ "n" => i, "s" => "row " + i }) ! { assert(false) return }
+    }
+    db.commit() ! { assert(false) return }
+
+    let rows = db.select("SELECT * FROM t ORDER BY n") ! { assert(false) return }
+    assert(rows.length == 10000)
+    assert(db.affected_rows == 10000)
+    let last = rows.get(9999) ! { assert(false) return }
+    assert((last["s"] ?? sqlite.Value.null()).to_string() == "row 10000")
+}
+
+test "Two threads with a connection each" {
+    let path = temp_path("threads")
+    let setup = sqlite.open(path) ! { println(E.message) assert(false) return }
+    setup.exec("CREATE TABLE counters (name TEXT PRIMARY KEY, n INTEGER)") ! { assert(false) return }
+    setup.run("INSERT INTO counters VALUES ('shared', 0)") ! { assert(false) return }
+    setup.close()
+
+    // Every thread opens its own connection, as the package asks
+    let shared_path: shared String = path + ""
+    let group = thread.ThreadGroup[uint].new()
+    let worker: uint = 0
+    while worker++ < 4 {
+        group.start(fn() uint {
+            let db = sqlite.open(shared_path) ! return 0
+            let written: uint = 0
+            let i: uint = 0
+            while i++ < 50 {
+                // Writers wait for each other rather than failing, thanks to the busy timeout
+                db.begin(true) ! continue
+                db.run("UPDATE counters SET n = n + 1 WHERE name = 'shared'") ! {
+                    db.rollback() _
+                    continue
+                }
+                db.commit() ! continue
+                written++
+            }
+            db.close()
+            return written
+        }) ! { assert(false) return }
+    }
+    let total: uint = 0
+    while group.has_pending() {
+        let index, written = group.await_next() ! break
+        total += written
+    }
+
+    let check = sqlite.open(path) ! { assert(false) return }
+    let counted = (check.value("SELECT n FROM counters WHERE name = 'shared'") ! { assert(false) return }).to_uint()
+    check.close()
+    assert(total == 200)
+    assert(counted == 200) // every write landed, none was lost
+    remove_database(path)
+}

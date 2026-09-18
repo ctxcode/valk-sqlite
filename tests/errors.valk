@@ -1,0 +1,113 @@
+use sqlite
+
+test "Errors" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL)") ! { assert(false) return }
+    db.run("INSERT INTO users (email) VALUES ('a@b.c')") ! { assert(false) return }
+
+    // A broken rule
+    db.run("INSERT INTO users (email) VALUES ('a@b.c')") ! {
+        assert(error_is(E.code, constraint))
+        assert(E.message.contains("UNIQUE"))
+        assert(E.result_code > 0)
+    }
+    db.run("INSERT INTO users (email) VALUES (NULL)") ! {
+        assert(error_is(E.code, constraint))
+    }
+
+    // The connection keeps working after an error
+    assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).to_int() == 1)
+
+    // SQL that cannot be prepared
+    db.query("SELEC 1") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.sql == "SELEC 1")
+    }
+    db.query("SELECT * FROM missing_table") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.message.contains("no such table"))
+    }
+    assert((db.value("SELECT 1") ! { assert(false) return }).to_int() == 1)
+
+    // Foreign keys are enforced, unlike in bare SQLite
+    db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id))") ! { assert(false) return }
+    db.run("INSERT INTO posts (user_id) VALUES (999)") ! {
+        assert(error_is(E.code, constraint))
+        assert(E.message.contains("FOREIGN KEY"))
+    }
+
+    // A closed connection says so instead of crashing
+    db.close()
+    assert(db.closed)
+    db.query("SELECT 1") ! {
+        assert(error_is(E.code, closed))
+        return
+    }
+    assert(false)
+}
+
+test "Foreign keys can be left off" {
+    let db = sqlite.open_memory(.{ foreign_keys: false }) ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE a (id INTEGER PRIMARY KEY)") ! { assert(false) return }
+    db.exec("CREATE TABLE b (a_id INTEGER REFERENCES a(id))") ! { assert(false) return }
+    db.run("INSERT INTO b VALUES (999)") ! { println(E.message) assert(false) return }
+    assert((db.value("SELECT count(*) FROM b") ! { assert(false) return }).to_int() == 1)
+}
+
+test "Statement cache" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER)") ! { assert(false) return }
+    let after_setup = db.statements_prepared
+
+    let i: uint = 0
+    while i++ < 50 : db.run("INSERT INTO t VALUES (:n)", .{ "n" => i }) ! { assert(false) return }
+    // One prepare for the insert, whatever the number of runs
+    assert(db.statements_prepared == after_setup + 1)
+
+    // A different statement is prepared once too
+    let n: uint = 0
+    while n++ < 10 : db.value("SELECT count(*) FROM t") ! { assert(false) return }
+    assert(db.statements_prepared == after_setup + 2)
+
+    // With a small cache the statements are thrown out and prepared again, and everything still
+    // gives the right answer
+    let small = sqlite.open_memory() ! { assert(false) return }
+    defer small.close()
+    small.statement_cache_size = 2
+    small.exec("CREATE TABLE t (n INTEGER)") ! { assert(false) return }
+    let k: uint = 0
+    while k++ < 20 {
+        small.run("INSERT INTO t VALUES (" + k + ")") ! { assert(false) return } // a new statement every time
+    }
+    assert((small.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 20)
+}
+
+test "Rows that are not read to the end" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER)") ! { assert(false) return }
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 100 : db.run("INSERT INTO t VALUES (:n)", .{ "n" => i }) ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+
+    // Stopping halfway through a query and starting another one is fine
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    let row: Map[sqlite.Value] = .{}
+    db.fetch_row(row) ! { assert(false) return }
+    assert((row["n"] ?? sqlite.Value.null()).to_int() == 1)
+
+    db.query("SELECT n FROM t WHERE n = 50") ! { assert(false) return }
+    let value = db.fetch_value() ! { assert(false) return }
+    assert(value.to_int() == 50)
+
+    // The same statement can run again while its first run was left open
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    db.fetch_row(row) ! { assert(false) return }
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    let all = db.fetch_all() ! { assert(false) return }
+    assert(all.length == 100)
+}

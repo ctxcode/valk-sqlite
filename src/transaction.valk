@@ -1,0 +1,39 @@
+extend Connection {
+
+    /// Starts a transaction.
+    ///
+    /// `immediate` takes the write lock at once instead of at the first write, which is what a
+    /// transaction that reads a value and then writes it back wants: without it, two such
+    /// transactions can both read, and the second one to write is thrown out with `busy`.
+    + fn begin(immediate: bool (false)) !Error {
+        this.exec(immediate ? "BEGIN IMMEDIATE" : "BEGIN") !>
+    }
+
+    /// Commits the open transaction.
+    + fn commit() !Error {
+        this.exec("COMMIT") !>
+    }
+
+    /// Rolls the open transaction back.
+    + fn rollback() !Error {
+        this.exec("ROLLBACK") !>
+    }
+
+    /// Names a point inside a transaction that can be rolled back to on its own.
+    + fn savepoint(name: String) !Error {
+        this.exec("SAVEPOINT " + quote_name(name)) !>
+    }
+    /// Rolls back to a savepoint, keeping the transaction itself open.
+    + fn rollback_to(name: String) !Error {
+        this.exec("ROLLBACK TO " + quote_name(name)) !>
+    }
+    /// Forgets a savepoint, keeping everything that was done since.
+    + fn release(name: String) !Error {
+        this.exec("RELEASE " + quote_name(name)) !>
+    }
+}
+
+// SQL identifiers are quoted with double quotes, and a double quote inside one is doubled
+fn quote_name(name: String) String {
+    return "\"" + name.replace("\"", "\"\"") + "\""
+}

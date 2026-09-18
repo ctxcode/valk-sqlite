@@ -1,0 +1,340 @@
+extend Connection {
+
+    /// Binds a value to the `:name` placeholder of the next query.
+    ///
+    /// The value stays bound until the query runs, and a name that the query does not use is
+    /// ignored, so settings that every query shares can be bound once.
+    + fn bind(name: String, value: $T) {
+        this.named_binds.set(name, convert(value))
+    }
+    /// Binds a value to the next `?` placeholder of the next query.
+    + fn bindv(value: $T) {
+        this.binds.append(convert(value))
+    }
+    /// Removes the values bound with `bind` and `bindv`.
+    + fn clear_binds() {
+        this.binds.clear()
+        this.named_binds.clear()
+    }
+
+    /// Runs one statement. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or
+    /// `fetch_value`.
+    ///
+    /// Values in `binds` are bound to the `:name` placeholders of the statement, next to what
+    /// `bind` and `bindv` bound earlier. SQLite understands `:name`, `@name`, `$name` and `?`,
+    /// and this package binds them all; a `?` takes the next value given to `bindv`.
+    ///
+    /// The statement is prepared once and kept, so running it again with other values is
+    /// cheaper. Use `exec` for several statements at once.
+    ///
+    /// ```valk
+    /// db.query("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
+    /// let users = db.fetch_all() ! panic("%{E.message}")
+    /// ```
+    + fn query(sql: String, binds: ?Map[?Value] (null)) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        this.stop()
+        this.affected_rows = 0
+        this.column_names.clear()
+
+        if isset(binds) {
+            each binds as value, name {
+                this.bind(name, value)
+            }
+        }
+        if this.debug : println("QUERY: " + sql)
+
+        let statement = this.prepare(sql) ! {
+            this.clear_binds()
+            throw E
+        }
+        this.bind_values(statement) ! {
+            statement.reset()
+            this.clear_binds()
+            throw E
+        }
+        this.clear_binds()
+
+        this.current = statement
+        let step = sqlite3_step(statement.stmt)
+        if step == SQLITE_ROW {
+            this.state = STATE_ROW
+            this.read_column_names(statement)
+            return
+        }
+        if step == SQLITE_DONE {
+            this.state = STATE_DONE
+            this.read_column_names(statement)
+            this.read_counters()
+            statement.reset()
+            this.current = null
+            return
+        }
+        this.state = STATE_IDLE
+        this.current = null
+        statement.reset()
+        this.fail(step, sql)
+    }
+
+    /// Reads the next row into `row` and returns whether there was one.
+    ///
+    /// The map is cleared first, so one map can be reused for every row of a query, which saves
+    /// an allocation per row.
+    ///
+    /// ```valk
+    /// let row: Map[sqlite.Value] = .{}
+    /// while db.fetch_row(row) ! panic("%{E.message}") {
+    ///     println(row["name"] ?? "")
+    /// }
+    /// ```
+    + fn fetch_row(row: Map[Value]) bool !Error {
+        @unsafe
+        if this.state != STATE_ROW : return false
+        let statement = this.current
+        if !isset(statement) : return false
+
+        row.clear()
+        let columns = this.column_names
+        let i: uint = 0
+        while i < statement.column_count {
+            let name = columns.get(i) !? i.to(String)
+            row.set(name, read_column(statement.stmt, i.to(i32)))
+            i++
+        }
+        this.affected_rows++
+        this.advance(statement) !>
+        return true
+    }
+
+    /// Returns the next row, or null when there is none left.
+    + fn fetch_one() ?Map[Value] !Error {
+        let row: Map[Value] = .{}
+        if !(this.fetch_row(row) !>) : return null
+        return row
+    }
+
+    /// Returns every row that is left.
+    + fn fetch_all() Array[Map[Value]] !Error {
+        let rows: Array[Map[Value]] = .{}
+        while true {
+            let row: Map[Value] = .{}
+            if !(this.fetch_row(row) !>) : return rows
+            rows.append(row)
+        }
+    }
+
+    /// Returns the first column of the next row, or NULL when there is no row left.
+    ///
+    /// This is for the queries that answer with one value, such as `SELECT count(*) FROM users`.
+    + fn fetch_value() Value !Error {
+        @unsafe
+        if this.state != STATE_ROW : return Value.null()
+        let statement = this.current
+        if !isset(statement) : return Value.null()
+        let value = Value.null()
+        if statement.column_count > 0 : value = read_column(statement.stmt, 0)
+        this.affected_rows++
+        this.advance(statement) !>
+        return value
+    }
+
+    /// Runs a statement and returns the rows it answered with, in one call.
+    + fn select(sql: String, binds: ?Map[?Value] (null)) Array[Map[Value]] !Error {
+        this.query(sql, binds) !>
+        return this.fetch_all() !>
+    }
+
+    /// Runs a statement that answers with one value, and returns it.
+    ///
+    /// ```valk
+    /// let total = (db.value("SELECT count(*) FROM users") ! panic("%{E.message}")).to_int()
+    /// ```
+    + fn value(sql: String, binds: ?Map[?Value] (null)) Value !Error {
+        this.query(sql, binds) !>
+        let value = this.fetch_value() !>
+        this.stop()
+        return value
+    }
+
+    /// Runs a statement that reads no rows, such as an `INSERT`, and returns how many rows it
+    /// changed.
+    + fn run(sql: String, binds: ?Map[?Value] (null)) uint !Error {
+        this.query(sql, binds) !>
+        this.stop()
+        return this.affected_rows
+    }
+
+    // Steps to the next row and closes the statement when there is none
+    fn advance(statement: Statement) !Error {
+        @unsafe
+        let step = sqlite3_step(statement.stmt)
+        if step == SQLITE_ROW {
+            this.state = STATE_ROW
+            return
+        }
+        this.state = STATE_DONE
+        this.current = null
+        let rows = this.affected_rows
+        if step != SQLITE_DONE {
+            statement.reset()
+            this.fail(step, statement.sql)
+        }
+        this.read_counters()
+        // A SELECT changes nothing, so the row count is the more useful number
+        if statement.column_count > 0 : this.affected_rows = rows
+        statement.reset()
+    }
+
+    fn read_column_names(statement: Statement) {
+        @unsafe
+        let names = this.column_names
+        let i: uint = 0
+        while i < statement.column_count {
+            let name = sqlite3_column_name(statement.stmt, i.to(i32))
+            names.append(isset(name) ? name.to(String) : "")
+            i++
+        }
+    }
+
+    // Prepares a statement, or returns the one that was prepared for this SQL before
+    fn prepare(sql: String) Statement !Error {
+        @unsafe
+        let cached = this.statements.get(sql) ! {
+            let stmt: ?STMT = null
+            let code = sqlite3_prepare_v2(this.db, sql.data, sql.length.to(i32), @ref(stmt), null)
+            if code != SQLITE_OK || !isset(stmt) {
+                if code == SQLITE_OK : throw .syntax { message: "The statement is empty", sql: sql }
+                this.fail(code, sql)
+            }
+            this.statements_prepared++
+            let statement = Statement {
+                stmt: stmt
+                sql: sql
+                con: this
+                column_count: sqlite3_column_count(stmt).to(uint)
+            }
+            this.cache(sql, statement)
+            return statement
+        }
+        cached.reset()
+        this.touch(sql)
+        return cached
+    }
+
+    // Keeps the cache at its size, dropping the statement that was used longest ago
+    fn cache(sql: String, statement: Statement) {
+        if this.statement_cache_size == 0 {
+            // No cache: the statement is finalized when the query is done with it
+            return
+        }
+        while this.order.length >= this.statement_cache_size {
+            let oldest = this.order.pop_first() ! break
+            let dropped = this.statements.get(oldest) ! continue
+            dropped.finalize()
+            this.statements.remove(oldest)
+        }
+        this.statements.set(sql, statement)
+        this.order.append(sql)
+    }
+
+    fn touch(sql: String) {
+        let at = this.order.index_of(sql) ! return
+        this.order.remove(at)
+        this.order.append(sql)
+    }
+
+    // Binds everything that was bound to the placeholders of the statement
+    fn bind_values(statement: Statement) !Error {
+        @unsafe
+        let stmt = statement.stmt
+        let count = sqlite3_bind_parameter_count(stmt).to(uint)
+        if count == 0 : return
+
+        // Named placeholders, whichever prefix they were written with
+        each this.named_binds as value, name {
+            let index = bind_index(stmt, ":" + name)
+            if index == 0 : index = bind_index(stmt, "@" + name)
+            if index == 0 : index = bind_index(stmt, "$" + name)
+            if index == 0 : continue // A name the statement does not use
+            bind_value(stmt, index, value) ! throw E { sql: statement.sql }
+        }
+
+        // Values bound without a name fill the `?` placeholders, in order
+        let values = this.binds
+        if values.length == 0 : return
+        let next: uint = 0
+        let i: i32 = 1
+        while i <= count.to(i32) {
+            if next >= values.length : break
+            let name = sqlite3_bind_parameter_name(stmt, i)
+            if !isset(name) {
+                let value = values.get(next++) ! break
+                bind_value(stmt, i, value) ! throw E { sql: statement.sql }
+            }
+            i++
+        }
+    }
+}
+
+fn bind_index(stmt: STMT, name: String) i32 {
+    @unsafe
+    return sqlite3_bind_parameter_index(stmt, name.data_cstring)
+}
+
+fn bind_value(stmt: STMT, index: i32, value: Value) !Error {
+    @unsafe
+    let type = value.type
+    let code: i32 = SQLITE_OK
+    if type == TYPE.null : code = sqlite3_bind_null(stmt, index)
+    else if type == TYPE.int : code = sqlite3_bind_int64(stmt, index, value.int_value.to(i64))
+    else if type == TYPE.float : code = sqlite3_bind_double(stmt, index, value.float_value.to(f64))
+    else if type == TYPE.blob {
+        let data = value.string_value
+        code = sqlite3_bind_blob64(stmt, index, data.data, data.length.to(u64), sqlite_transient())
+    } else {
+        let text = value.string_value
+        code = sqlite3_bind_text64(stmt, index, text.data, text.length.to(u64), sqlite_transient(), 1)
+    }
+    if code != SQLITE_OK : throw .error { message: "Cannot bind the value at position " + index, result_code: code.to(int) }
+}
+
+// Reads one column of the current row
+fn read_column(stmt: STMT, index: i32) Value {
+    @unsafe
+    let type = sqlite3_column_type(stmt, index)
+    if type == SQLITE_NULL : return Value.null()
+    if type == SQLITE_INTEGER : return Value { type: TYPE.int, int_value: sqlite3_column_int64(stmt, index).to(int) }
+    if type == SQLITE_FLOAT : return Value { type: TYPE.float, float_value: sqlite3_column_double(stmt, index).to(float) }
+    // Text and blobs are both bytes; reading them through the blob functions keeps every byte,
+    // including a zero byte inside a text value
+    let data = sqlite3_column_blob(stmt, index)
+    let length = sqlite3_column_bytes(stmt, index).to(uint)
+    let bytes = ""
+    if isset(data) && length > 0 : bytes = String.copy_from_ptr(data, length)
+    return Value {
+        type: type == SQLITE_BLOB ? TYPE.blob : TYPE.string
+        string_value: bytes
+    }
+}
+
+/// Returns `?, ?, ?` for `count` values, to write an `IN (...)` list.
+///
+/// SQLite binds one value per placeholder, so a list needs as many as it has values. The values
+/// themselves go in with `bindv`, in the same order.
+///
+/// ```valk
+/// let ids = Array[uint]{ 1, 2, 3 }
+/// each ids as id : db.bindv(id)
+/// let rows = db.select("SELECT * FROM users WHERE id IN (" + sqlite.placeholders(ids.length) + ")") ! panic("%{E.message}")
+/// ```
++ fn placeholders(count: uint) String {
+    if count == 0 : return ""
+    let out = ByteBuffer.new(count * 3)
+    let i: uint = 0
+    while i++ < count {
+        if i > 1 : out.write(", ")
+        out.write_byte('?')
+    }
+    return out.to_string()
+}

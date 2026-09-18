@@ -1,0 +1,44 @@
+// A prepared statement. The connection keeps these in its cache and reuses them, so this type
+// stays internal: the public API is `query` and the fetch methods.
+
+value STATE_IDLE (0)
+value STATE_ROW (1)
+value STATE_DONE (2)
+
+class Statement {
+    stmt: STMT
+    sql: String
+    // Keeps the connection alive for as long as the statement is in use
+    con: Connection
+    column_count: uint (0)
+    finalized: bool (false)
+
+    // A prepared statement is a handle into SQLite, not a value: a copy would finalize the same
+    // statement twice, so a clone is the same statement
+    fn clone() SELF $clone {
+        return this
+    }
+
+    // Puts the statement back in the state it was prepared in
+    fn reset() {
+        @unsafe
+        if this.finalized : return
+        sqlite3_reset(this.stmt)
+        sqlite3_clear_bindings(this.stmt)
+    }
+
+    fn finalize() {
+        @unsafe
+        if this.finalized : return
+        this.finalized = true
+        sqlite3_finalize(this.stmt)
+    }
+
+    // SQLite frees a statement of a closed connection by itself, so this only has to run for a
+    // statement that is dropped while its connection lives on
+    fn gc_free() {
+        @unsafe
+        if this.finalized : return
+        sqlite3_finalize(this.stmt)
+    }
+}

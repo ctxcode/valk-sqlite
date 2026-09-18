@@ -1,0 +1,72 @@
+use sqlite
+use valk.fs
+
+// A small task list, in a database file next to this example
+fn main() {
+    let path = __DIR__ + "/tasks.db"
+    fs.delete_file(path) _
+    fs.delete_file(path + "-wal") _
+    fs.delete_file(path + "-shm") _
+
+    let db = sqlite.open(path) ! panic("Cannot open the database: %{E.message}")
+    defer db.close()
+    println("SQLite " + sqlite.version() + ", database at " + path)
+
+    db.exec("
+        CREATE TABLE lists (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY,
+            list_id INTEGER NOT NULL REFERENCES lists(id),
+            title TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0
+        );
+    ") ! panic("Cannot create the tables: %{E.message}")
+
+    // One insert, and the rowid it wrote
+    db.run("INSERT INTO lists (name) VALUES (:name)", .{ "name" => "today" }) ! panic("%{E.message}")
+    let list_id = db.last_insert_id
+    println("list " + list_id + " created")
+
+    // Many inserts belong in one transaction: it is both faster and all-or-nothing
+    let titles = Array[String]{ "write the package", "run the tests", "write the README" }
+    db.begin() ! panic("%{E.message}")
+    each titles as title {
+        db.run("INSERT INTO tasks (list_id, title) VALUES (:list, :title)", .{ "list" => list_id, "title" => title }) ! {
+            db.rollback() _
+            panic("Cannot add a task: %{E.message}")
+        }
+    }
+    db.commit() ! panic("%{E.message}")
+
+    db.run("UPDATE tasks SET done = 1 WHERE title = :title", .{ "title" => "write the package" }) ! panic("%{E.message}")
+
+    // Read the rows back
+    db.query("
+        SELECT tasks.id, tasks.title, tasks.done
+        FROM tasks JOIN lists ON lists.id = tasks.list_id
+        WHERE lists.name = :name
+        ORDER BY tasks.id
+    ", .{ "name" => "today" }) ! panic("%{E.message}")
+
+    let row: Map[sqlite.Value] = .{}
+    while (db.fetch_row(row) ! panic("Cannot read a row: %{E.message}")) {
+        let done = (row["done"] ?? sqlite.Value.null()).to_bool()
+        println((done ? "[x] " : "[ ] ") + (row["title"] ?? sqlite.Value.null()))
+    }
+
+    // A query that answers with one value
+    let open_tasks = (db.value("SELECT count(*) FROM tasks WHERE done = 0") ! panic("%{E.message}")).to_int()
+    println(open_tasks + " still to do")
+
+    // A rule the database enforces, since foreign keys are on
+    db.run("INSERT INTO tasks (list_id, title) VALUES (999, 'orphan')") ! {
+        println("refused, as it should be: " + E.message)
+    }
+
+    // An online backup, safe to take while other connections are writing
+    db.backup_to(path + ".backup") ! panic("%{E.message}")
+    println("backed up to " + path + ".backup")
+}
