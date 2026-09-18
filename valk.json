@@ -5,5 +5,13 @@
         "valk": {
             "min": "0.7.2"
         }
+    },
+    "dependencies": {
+        "sql": {
+            "src": "github.com/ctxcode/valk-sql",
+            "version": "0.1.x",
+            "current": "0.1.1",
+            "current_hash": "22bb59b31c57fdf0298ceee0ffad02e0d79b3263"
+        }
     }
 }

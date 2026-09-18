@@ -214,6 +214,25 @@ The cache holds 64 statements per connection; `db.statement_cache_size` changes 
 `db.statements_prepared` says how many statements were prepared, to check that the cache is
 doing its work.
 
+## With valk-sql
+
+`sqlite.database(con)` turns a connection into a `sql.Db` of the
+[valk-sql](https://github.com/ctxcode/valk-sql) package, which gives every database the same
+API: a query builder, migrations, connection pools, and rows read into your own classes. The
+same program then runs on another database by opening it with that driver instead.
+
+```rust
+use sql
+use sqlite
+
+let db = sqlite.database(sqlite.open("app.db") ! panic("%{E.message}"))
+db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! panic("%{E.message}")
+let rows = db.all("SELECT * FROM users WHERE age > ?", .{ sql.Value.of_int(18) }) ! panic("%{E.message}")
+```
+
+The connection itself keeps working as before: the wrapper is a view of it, and the driver's own
+API stays there for the paths where every allocation counts.
+
 ## Development
 
 `make test` runs the suite, which needs nothing but SQLite; databases are written under

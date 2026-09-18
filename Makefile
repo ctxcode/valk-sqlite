@@ -4,6 +4,8 @@ test:
 	$(vc) build ./tests --test --run
 test-basics:
 	$(vc) build ./tests --test --run --filter "Basics"
+deps:
+	vman install
 lint:
 	$(vc) build ./src --lint
 example:
@@ -12,4 +14,4 @@ docs:
 	$(vc) doc . -o docs/api.md --markdown --no-private
 	$(vc) doc . -o docs/api-full.md --markdown --no-private --full
 
-.PHONY: test test-basics lint example docs
+.PHONY: deps test test-basics lint example docs

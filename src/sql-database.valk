@@ -1,0 +1,194 @@
+use sql
+
+/// Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
+///
+/// Everything `valk-sql` offers — the query builder, migrations, pools, rows read into your own
+/// classes — then works on this database, and the same code runs on MySQL or Postgres by
+/// opening it with their driver instead.
+///
+/// The connection itself stays usable: this is a view of it, not a replacement.
+///
+/// ```valk
+/// use sql
+/// use sqlite
+///
+/// let db = sqlite.database(sqlite.open("app.db") ! panic("%{E.message}"))
+/// db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic("%{E.message}")
+/// ```
++ fn database(con: Connection) sql.Db {
+    return sql.Db.new(SqlDriver { con: con })
+}
+
+// The connection behind a `sql.Db`
+class SqlDriver is sql.Driver {
+    con: Connection
+
+    + get dialect: sql.Dialect {
+        return sql.Dialect.sqlite
+    }
+
+    + fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
+        this.run_statement(statement, args) !>
+        let changed = this.con.affected_rows
+        this.con.stop()
+        return changed
+    }
+
+
+    + fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
+        this.run_statement(statement, args) !>
+        return SqlRows { con: this.con }
+    }
+
+    fn run_statement(statement: String, args: Array[sql.Value]) !sql.Error {
+        let con = this.con
+        con.clear_binds()
+        each args as arg {
+            con.bindv(to_driver_value(arg))
+        }
+        translate(statement, fn() !Error {
+            con.query(statement) !>
+        }) !>
+    }
+
+    + fn last_insert_id() int {
+        return this.con.last_insert_id
+    }
+
+    + fn begin(immediate: bool) !sql.Error {
+        let con = this.con
+        translate("BEGIN", fn() !Error {
+            con.begin(immediate) !>
+        }) !>
+    }
+    + fn commit() !sql.Error {
+        let con = this.con
+        translate("COMMIT", fn() !Error {
+            con.commit() !>
+        }) !>
+    }
+    + fn rollback() !sql.Error {
+        let con = this.con
+        translate("ROLLBACK", fn() !Error {
+            con.rollback() !>
+        }) !>
+    }
+
+    + fn ping() bool {
+        if this.con.closed : return false
+        let value = this.con.value("SELECT 1") !? Value.null()
+        return value.to_int() == 1
+    }
+
+    + fn close() {
+        this.con.close()
+    }
+}
+
+// The rows of one query, read through the connection that is running it.
+//
+// The columns are read straight from the statement into `sql.Value`s, rather than into this
+// package's own values first: a row then costs one map instead of two.
+class SqlRows is sql.Rows {
+    con: Connection
+
+    + fn next(row: Map[sql.Value]) bool !sql.Error {
+        let con = this.con
+        return translate_value[bool]("", fn() bool !Error {
+            return con.fetch_sql_row(row) !>
+        }) !>
+    }
+
+    + fn close() {
+        this.con.stop()
+    }
+}
+
+extend Connection {
+    // The same as `fetch_row`, filling `sql.Value`s
+    fn fetch_sql_row(row: Map[sql.Value]) bool !Error {
+        @unsafe
+        if this.state != STATE_ROW : return false
+        let statement = this.current
+        if !isset(statement) : return false
+
+        row.clear()
+        let columns = this.column_names
+        let i: uint = 0
+        while i < statement.column_count {
+            let name = columns.get(i) !? i.to(String)
+            row.set(name, read_sql_column(statement.stmt, i.to(i32)))
+            i++
+        }
+        this.affected_rows++
+        this.advance(statement) !>
+        return true
+    }
+}
+
+// Reads one column of the current row as a `sql.Value`
+fn read_sql_column(stmt: STMT, index: i32) sql.Value {
+    @unsafe
+    let type = sqlite3_column_type(stmt, index)
+    if type == SQLITE_NULL : return sql.Value.null()
+    if type == SQLITE_INTEGER : return sql.Value.of_int(sqlite3_column_int64(stmt, index).to(int))
+    if type == SQLITE_FLOAT : return sql.Value.of_float(sqlite3_column_double(stmt, index).to(float))
+    let data = sqlite3_column_blob(stmt, index)
+    let length = sqlite3_column_bytes(stmt, index).to(uint)
+    let bytes = ""
+    if isset(data) && length > 0 : bytes = String.copy_from_ptr(data, length)
+    if type == SQLITE_BLOB : return sql.Value.of_blob(bytes)
+    return sql.Value.of(bytes)
+}
+
+// SQLite stores five kinds of value and `sql` names the same five, plus a boolean this database
+// does not have: that one is stored as 1 and 0, as SQL on SQLite does it
+fn to_driver_value(value: sql.Value) Value {
+    let type = value.type
+    if type == sql.TYPE.null : return Value.null()
+    if type == sql.TYPE.bool : return Value.of_int(value.to_int())
+    if type == sql.TYPE.int : return Value.of_int(value.int_value)
+    if type == sql.TYPE.float : return Value.of_float(value.float_value)
+    if type == sql.TYPE.blob : return Value.of_blob(value.text)
+    return Value.of(value.text)
+}
+
+fn to_sql_value(value: Value) sql.Value {
+    let type = value.type
+    if type == TYPE.null : return sql.Value.null()
+    if type == TYPE.int : return sql.Value.of_int(value.int_value)
+    if type == TYPE.float : return sql.Value.of_float(value.float_value)
+    if type == TYPE.blob : return sql.Value.of_blob(value.string_value)
+    return sql.Value.of(value.string_value)
+}
+
+// An error type is not a value in valk, so a caught error cannot be handed to a function.
+// Every driver call therefore runs through here, which is the one place that maps the errors of
+// this package onto the errors of `sql`.
+fn translate_value[T](statement: String, work: fn()(T !Error)) T !sql.Error {
+    return work() ! {
+        let code = E.result_code.to(String)
+        let text = E.sql.length > 0 ? E.sql : statement
+        if error_is(E.code, open) : throw .connect { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, syntax) : throw .syntax { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, constraint) : throw .constraint { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, busy) : throw .busy { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, readonly) : throw .readonly { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: code, sql: text }
+        throw .error { message: E.message, driver_code: code, sql: text }
+    }
+}
+
+fn translate(statement: String, work: fn()(!Error)) !sql.Error {
+    work() ! {
+        let code = E.result_code.to(String)
+        let text = E.sql.length > 0 ? E.sql : statement
+        if error_is(E.code, open) : throw .connect { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, syntax) : throw .syntax { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, constraint) : throw .constraint { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, busy) : throw .busy { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, readonly) : throw .readonly { message: E.message, driver_code: code, sql: text }
+        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: code, sql: text }
+        throw .error { message: E.message, driver_code: code, sql: text }
+    }
+}

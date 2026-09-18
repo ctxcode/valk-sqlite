@@ -54,6 +54,8 @@ The kinds of `Value`, which are the storage classes of SQLite.
 ```js
 // Converts any supported value (integers, floats, bools, text, json values, and nullable versions of those) into a `Value`.
 + fn convert(ndata: $T) Value
+// Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
++ fn database(con: Connection) Db
 // Opens a database file, creating it when it does not exist.
 + fn open(path: String, options: OpenOptions (.{})) Connection !Error
 // Opens a database that lives in memory and disappears when the connection closes.
@@ -68,6 +70,24 @@ The kinds of `Value`, which are the storage classes of SQLite.
 
 Converts any supported value (integers, floats, bools, text, json values, and nullable
 versions of those) into a `Value`.
+
+### database
+
+Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
+
+Everything `valk-sql` offers — the query builder, migrations, pools, rows read into your own
+classes — then works on this database, and the same code runs on MySQL or Postgres by
+opening it with their driver instead.
+
+The connection itself stays usable: this is a view of it, not a replacement.
+
+```valk
+use sql
+use sqlite
+
+let db = sqlite.database(sqlite.open("app.db") ! panic("%{E.message}"))
+db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic("%{E.message}")
+```
 
 ### open
 

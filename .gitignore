@@ -2,3 +2,5 @@ debug
 example/vendor
 tests/tmp
 example/tasks.db*
+vendor
+tests/vendor

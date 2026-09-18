@@ -28,6 +28,8 @@ Namespaces: [main](#main)
 ```js
 // Converts any supported value (integers, floats, bools, text, json values, and nullable versions of those) into a `Value`.
 + fn convert(ndata: $T) Value
+// Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
++ fn database(con: Connection) Db
 // Opens a database file, creating it when it does not exist.
 + fn open(path: String, options: OpenOptions (.{})) Connection !Error
 // Opens a database that lives in memory and disappears when the connection closes.

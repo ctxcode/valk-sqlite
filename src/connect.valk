@@ -155,7 +155,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         @unsafe
         let rest = sql
         while true {
-            rest = rest.trim(" \t\r\n")
+            rest = trim_space(rest)
             if rest.length == 0 : return
             let stmt: ?STMT = null
             let tail: ?ptr = null
@@ -268,6 +268,19 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         }
         throw .error { message: message, result_code: result, sql: sql }
     }
+}
+
+// `String.trim` removes copies of a whole string, so whitespace is trimmed byte by byte
+fn trim_space(text: String) String {
+    let start: uint = 0
+    let end = text.length
+    while start < end && is_space(text[start]) : start++
+    while end > start && is_space(text[end - 1]) : end--
+    return text.range(start, end - start)
+}
+
+fn is_space(ch: u8) bool {
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
 }
 
 fn journal_name(journal: Journal) String {

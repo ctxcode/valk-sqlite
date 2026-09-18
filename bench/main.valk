@@ -1,0 +1,123 @@
+use sqlite
+use sql
+use valk.time
+
+// What going through valk-sql costs on top of the driver itself.
+value ROWS (50000)
+
+fn main() {
+    println("rows: " + ROWS + ", best of three")
+    let round: uint = 0
+    while round++ < 3 {
+        println("-- round " + round)
+        bench_insert_direct()
+        bench_insert_sql()
+        bench_select_rows_direct()
+        bench_select_rows_sql()
+        bench_select_one_direct()
+        bench_select_one_sql()
+    }
+}
+
+fn fresh_direct() sqlite.Connection {
+    let con = sqlite.open_memory() !! 
+    con.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, n INTEGER)") !!
+    return con
+}
+
+fn report(label: String, start: uint) {
+    let us = time.mono_us() - start
+    println(label.pad_right(' ', 34) + (us / 1000) + " ms")
+}
+
+fn bench_insert_direct() {
+    let con = fresh_direct()
+    let start = time.mono_us()
+    con.begin() !!
+    let i: uint = 0
+    while i++ < ROWS {
+        con.run("INSERT INTO t (name, n) VALUES (:name, :n)", .{ "name" => "row", "n" => i }) !!
+    }
+    con.commit() !!
+    report("insert, driver", start)
+    con.close()
+}
+
+fn bench_insert_sql() {
+    let db = sqlite.database(fresh_direct())
+    let start = time.mono_us()
+    db.begin() !!
+    let i: uint = 0
+    while i++ < ROWS {
+        db.exec("INSERT INTO t (name, n) VALUES (?, ?)", .{ sql.Value.of("row"), sql.Value.of_int(i.to(int)) }) !!
+    }
+    db.commit() !!
+    report("insert, through sql", start)
+    db.close()
+}
+
+fn filled_direct() sqlite.Connection {
+    let con = fresh_direct()
+    con.begin() !!
+    let i: uint = 0
+    while i++ < ROWS {
+        con.run("INSERT INTO t (name, n) VALUES (:name, :n)", .{ "name" => "row " + i, "n" => i }) !!
+    }
+    con.commit() !!
+    return con
+}
+
+fn bench_select_rows_direct() {
+    let con = filled_direct()
+    let start = time.mono_us()
+    let total: int = 0
+    con.query("SELECT id, name, n FROM t") !!
+    let row: Map[sqlite.Value] = .{}
+    while (con.fetch_row(row) !!) {
+        total += (row["n"] ?? sqlite.Value.null()).to_int()
+    }
+    report("select " + ROWS + " rows, driver", start)
+    if total == 0 : println("no rows?")
+    con.close()
+}
+
+fn bench_select_rows_sql() {
+    let db = sqlite.database(filled_direct())
+    let start = time.mono_us()
+    let total: int = 0
+    let rows = db.query("SELECT id, name, n FROM t") !!
+    let row: Map[sql.Value] = .{}
+    while (rows.next(row) !!) {
+        total += (row.get("n") !? sql.Value.null()).to_int()
+    }
+    rows.close()
+    report("select " + ROWS + " rows, through sql", start)
+    if total == 0 : println("no rows?")
+    db.close()
+}
+
+fn bench_select_one_direct() {
+    let con = filled_direct()
+    let start = time.mono_us()
+    let total: int = 0
+    let i: uint = 0
+    while i++ < ROWS {
+        total += (con.value("SELECT n FROM t WHERE id = :id", .{ "id" => i }) !!).to_int()
+    }
+    report("select 1 row x " + ROWS + ", driver", start)
+    if total == 0 : println("no rows?")
+    con.close()
+}
+
+fn bench_select_one_sql() {
+    let db = sqlite.database(filled_direct())
+    let start = time.mono_us()
+    let total: int = 0
+    let i: uint = 0
+    while i++ < ROWS {
+        total += (db.value("SELECT n FROM t WHERE id = ?", .{ sql.Value.of_int(i.to(int)) }) !!).to_int()
+    }
+    report("select 1 row x " + ROWS + ", through sql", start)
+    if total == 0 : println("no rows?")
+    db.close()
+}
