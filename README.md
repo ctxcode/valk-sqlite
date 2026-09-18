@@ -4,7 +4,7 @@
 A SQLite client for [Valk](https://valk-lang.dev). It binds the SQLite C library, so the
 database runs inside your program: no server, no port, no credentials, one file.
 
-Requires Valk 0.7.2 or newer, and SQLite 3.24 or newer on the system:
+Requires Valk 0.7.3 or newer, and SQLite 3.24 or newer on the system:
 
 | system | install | tested |
 | --- | --- | --- |
