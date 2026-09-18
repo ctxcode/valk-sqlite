@@ -152,6 +152,28 @@ global db: sqlite.Connection (sqlite.open("app.db") !! )
 which every thread runs for itself. Several connections to one file work together through the
 database's own locking; that is what `busy_timeout_ms` and WAL are for.
 
+## Functions written in Valk
+
+SQL can call a Valk closure, which is how a rule that is easier to write in Valk than in SQL
+gets used inside a query:
+
+```rust
+db.create_function("slugify", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+    let text = (args.get(0) !? sqlite.Value.null()).to_string()
+    return sqlite.Value.of(text.lower().replace(" ", "-"))
+}, true) ! panic("%{E.message}")
+
+let slug = db.value("SELECT slugify(title) FROM posts WHERE id = :id", .{ "id" => 1 }) ! panic("%{E.message}")
+```
+
+`arg_count` is how many arguments the function takes, or -1 for any number. The last argument
+says the function is deterministic: the same arguments always give the same answer, which lets
+SQLite use it in an index, as in `CREATE INDEX posts_slug ON posts (slugify(title))`. Leave it
+off for anything that reads a clock or a counter.
+
+An error the handler throws becomes the error of the query. The handler runs while the query
+runs, on the same thread, so it may not use the connection it was registered on.
+
 ## Backups
 
 ```rust
@@ -201,6 +223,6 @@ doing its work.
 
 ## Not supported
 
-Custom SQL functions, collations and hooks (`sqlite3_create_function` and friends) need C
-callbacks and are not bound yet. Neither are extensions, encryption, and the session and
-serialization interfaces.
+Aggregate functions (`xStep`/`xFinal`), collations and the update, commit and authorizer hooks
+are not bound; scalar functions are, see above. Neither are extensions, encryption, and the
+session and serialization interfaces.

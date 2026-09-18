@@ -1,0 +1,148 @@
+// A function written in Valk, called by SQLite while a query runs.
+//
+// SQLite calls C function pointers, so one trampoline is registered for every function and the
+// closure to call is found through the `pApp` pointer, which holds the id it was registered
+// under. The registry is a global, and globals are per thread, which matches a connection
+// belonging to one thread: the callback always runs on the thread that started the query.
+
+global registered: HashMap[uint, SqlFunction] (.{})
+global next_function_id: uint (1)
+
+class SqlFunction {
+    name: String
+    handler: fn(Array[Value])(Value !Error)
+}
+
+extend Connection {
+    function_ids: Array[uint] (.{})
+
+    /// Registers a function that SQL on this connection can call.
+    ///
+    /// `arg_count` is how many arguments it takes, or -1 for any number. The handler is given
+    /// the arguments and returns the result; an error it throws reaches the query as a SQLite
+    /// error, so `db.query` throws `error` with that message.
+    ///
+    /// `deterministic` says that the same arguments always give the same answer, which lets
+    /// SQLite use the function in an index or a `WHERE` clause it optimizes. Leave it off for a
+    /// function that reads a clock, a counter or anything else that changes.
+    ///
+    /// ```valk
+    /// db.create_function("slugify", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+    ///     let text = (args.get(0) !? sqlite.Value.null()).to_string()
+    ///     return sqlite.Value.of(text.lower().replace(" ", "-"))
+    /// }, true) ! panic("%{E.message}")
+    ///
+    /// let slug = db.value("SELECT slugify(title) FROM posts WHERE id = 1") ! panic("%{E.message}")
+    /// ```
+    ///
+    /// The handler runs while the query runs, on the same thread, so it may not use the
+    /// connection it was registered on.
+    + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+
+        let id = next_function_id++
+        registered.set(id, SqlFunction { name: name, handler: handler })
+
+        let encoding: i32 = SQLITE_UTF8
+        if deterministic : encoding |= SQLITE_DETERMINISTIC
+        let trampoline: fnptr(CONTEXT, i32, ptr)() = call_sql_function
+        let code = sqlite3_create_function_v2(this.db, name.data_cstring, arg_count.to(i32), encoding,
+            id.@cast(ptr), trampoline.@cast(ptr), null, null, null)
+        if code != SQLITE_OK {
+            registered.remove(id)
+            this.fail(code, "CREATE FUNCTION " + name)
+        }
+        this.function_ids.append(id)
+    }
+
+    /// Removes a function that was registered with `create_function`.
+    + fn remove_function(name: String, arg_count: int) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        let code = sqlite3_create_function_v2(this.db, name.data_cstring, arg_count.to(i32), SQLITE_UTF8, null, null, null, null, null)
+        if code != SQLITE_OK : this.fail(code, "DROP FUNCTION " + name)
+        // The closure stays in the registry: SQLite may still be running a statement that uses it
+    }
+
+    // Frees the closures of this connection; called when it closes
+    fn release_functions() {
+        each this.function_ids as id {
+            registered.remove(id)
+        }
+        this.function_ids.clear()
+    }
+}
+
+// The one C entry point: every registered function comes through here
+fn call_sql_function(context: CONTEXT, arg_count: i32, args: ptr) {
+    @unsafe
+    let data = sqlite3_user_data(context)
+    if !isset(data) {
+        set_function_error(context, "This function is not registered")
+        return
+    }
+    let entry = registered.get(data.@cast(uint)) ! {
+        set_function_error(context, "This function is no longer registered")
+        return
+    }
+
+    // `args` is an array of pointers to the values
+    let values = Array[Value].new(arg_count.to(uint))
+    let i: uint = 0
+    while i < arg_count.to(uint) {
+        let value = args.@cast(*[?VALUE])[i]
+        if !isset(value) : values.append(Value.null())
+        else : values.append(read_sql_value(value))
+        i++
+    }
+
+    let result = entry.handler(values) ! {
+        set_function_error(context, E.message)
+        return
+    }
+    set_function_result(context, result)
+}
+
+fn read_sql_value(value: VALUE) Value {
+    @unsafe
+    let type = sqlite3_value_type(value)
+    if type == SQLITE_NULL : return Value.null()
+    if type == SQLITE_INTEGER : return Value { type: TYPE.int, int_value: sqlite3_value_int64(value).to(int) }
+    if type == SQLITE_FLOAT : return Value { type: TYPE.float, float_value: sqlite3_value_double(value).to(float) }
+    let data = sqlite3_value_blob(value)
+    let length = sqlite3_value_bytes(value).to(uint)
+    let bytes = ""
+    if isset(data) && length > 0 : bytes = String.copy_from_ptr(data, length)
+    return Value {
+        type: type == SQLITE_BLOB ? TYPE.blob : TYPE.string
+        string_value: bytes
+    }
+}
+
+fn set_function_result(context: CONTEXT, value: Value) {
+    @unsafe
+    let type = value.type
+    if type == TYPE.null {
+        sqlite3_result_null(context)
+        return
+    }
+    if type == TYPE.int {
+        sqlite3_result_int64(context, value.int_value.to(i64))
+        return
+    }
+    if type == TYPE.float {
+        sqlite3_result_double(context, value.float_value.to(f64))
+        return
+    }
+    let bytes = value.string_value
+    // SQLITE_TRANSIENT: sqlite copies the bytes, which it must, since this string is owned by
+    // the garbage collector
+    if type == TYPE.blob : sqlite3_result_blob64(context, bytes.data, bytes.length.to(u64), sqlite_transient())
+    else : sqlite3_result_text64(context, bytes.data, bytes.length.to(u64), sqlite_transient(), 1)
+}
+
+fn set_function_error(context: CONTEXT, message: String) {
+    @unsafe
+    sqlite3_result_error(context, message.data, message.length.to(i32))
+}

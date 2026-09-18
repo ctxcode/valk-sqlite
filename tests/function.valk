@@ -1,0 +1,111 @@
+use sqlite
+use valk.gc
+
+test "Custom functions" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+
+    // A function of one argument
+    db.create_function("slugify", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        let text = (args.get(0) !? sqlite.Value.null()).to_string()
+        return sqlite.Value.of(text.lower().replace(" ", "-"))
+    }, true) ! { println(E.message) assert(false) return }
+
+    assert((db.value("SELECT slugify('Hello There World')") ! { println(E.message) assert(false) return }).to_string() == "hello-there-world")
+
+    // Numbers in and out
+    db.create_function("add_up", 2, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        let a = (args.get(0) !? sqlite.Value.null()).to_float()
+        let b = (args.get(1) !? sqlite.Value.null()).to_float()
+        return sqlite.Value.of_float(a + b)
+    }) ! { assert(false) return }
+    assert((db.value("SELECT add_up(1.5, 2)") ! { assert(false) return }).to_float() == 3.5)
+
+    // Any number of arguments
+    db.create_function("count_args", -1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        return sqlite.Value.of_int(args.length.to(int))
+    }) ! { assert(false) return }
+    assert((db.value("SELECT count_args(1, 2, 3, 4)") ! { assert(false) return }).to_int() == 4)
+    assert((db.value("SELECT count_args()") ! { assert(false) return }).to_int() == 0)
+
+    // NULL and blobs travel both ways
+    db.create_function("describe", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        let value = args.get(0) !? sqlite.Value.null()
+        if value.is_null() : return sqlite.Value.of("nothing")
+        if value.is_blob() : return sqlite.Value.of("blob of " + value.to_string().length)
+        return sqlite.Value.of("a " + (value.type == sqlite.TYPE.int ? "number" : "text"))
+    }) ! { assert(false) return }
+    assert((db.value("SELECT describe(NULL)") ! { assert(false) return }).to_string() == "nothing")
+    assert((db.value("SELECT describe(7)") ! { assert(false) return }).to_string() == "a number")
+    assert((db.value("SELECT describe(x'00ff00')") ! { assert(false) return }).to_string() == "blob of 3")
+
+    db.create_function("to_blob", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        return sqlite.Value.of_blob((args.get(0) !? sqlite.Value.null()).to_string())
+    }) ! { assert(false) return }
+    let blob = db.value("SELECT to_blob('abc')") ! { assert(false) return }
+    assert(blob.is_blob())
+    assert(blob.to_string() == "abc")
+
+    // An error the handler throws reaches the query
+    db.create_function("refuse", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        throw .error { message: "this argument is not allowed" }
+    }) ! { assert(false) return }
+    db.value("SELECT refuse(1)") ! {
+        assert(E.message.contains("not allowed"))
+        // The connection keeps working afterwards
+        assert((db.value("SELECT 1 + 1") ! { assert(false) return }).to_int() == 2)
+        return
+    }
+    assert(false)
+}
+
+test "Custom functions over many rows" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER, s TEXT)") ! { assert(false) return }
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 500 : db.run("INSERT INTO t VALUES (:n, :s)", .{ "n" => i, "s" => "row " + i }) ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+
+    // The handler allocates for every row, and collects garbage while SQLite holds the stack
+    db.create_function("decorate", 2, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        let n = (args.get(0) !? sqlite.Value.null()).to_int()
+        let s = (args.get(1) !? sqlite.Value.null()).to_string()
+        let parts = Array[String]{ "[", n.to(String), "] ", s }
+        if n % 100 == 0 : gc.collect()
+        return sqlite.Value.of(parts.join(""))
+    }, true) ! { assert(false) return }
+
+    let rows = db.select("SELECT decorate(n, s) AS text FROM t ORDER BY n") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(rows.length == 500)
+    assert((rows.get(0) ! { assert(false) return }["text"] ?? sqlite.Value.null()).to_string() == "[1] row 1")
+    assert((rows.get(499) ! { assert(false) return }["text"] ?? sqlite.Value.null()).to_string() == "[500] row 500")
+
+    // A function used where SQLite optimizes: in a WHERE clause and an index
+    db.exec("CREATE INDEX t_decorated ON t (decorate(n, s))") ! { println(E.message) assert(false) return }
+    let found = db.select("SELECT n FROM t WHERE decorate(n, s) = '[42] row 42'") ! { assert(false) return }
+    assert(found.length == 1)
+    assert((found.get(0) ! { assert(false) return }["n"] ?? sqlite.Value.null()).to_int() == 42)
+}
+
+test "Functions are removed with the connection" {
+    let db = memory() ! { assert(false) return }
+    db.create_function("temporary_one", 0, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+        return sqlite.Value.of_int(1)
+    }) ! { assert(false) return }
+    assert((db.value("SELECT temporary_one()") ! { assert(false) return }).to_int() == 1)
+
+    db.remove_function("temporary_one", 0) ! { assert(false) return }
+    db.query("SELECT temporary_one()") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.message.contains("no such function"))
+        db.close()
+        return
+    }
+    assert(false)
+}

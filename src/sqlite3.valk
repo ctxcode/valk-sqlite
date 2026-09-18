@@ -5,6 +5,8 @@ link "sqlite3"
 pointer DB {}
 pointer STMT {}
 pointer BACKUP {}
+pointer CONTEXT {}
+pointer VALUE {}
 
 // Result codes
 value SQLITE_OK (0)
@@ -40,6 +42,11 @@ value SQLITE_OPEN_URI (0x00000040)
 value SQLITE_OPEN_MEMORY (0x00000080)
 value SQLITE_OPEN_NOMUTEX (0x00008000)
 value SQLITE_OPEN_FULLMUTEX (0x00010000)
+
+// Text encoding and function flags
+value SQLITE_UTF8 (1)
+value SQLITE_DETERMINISTIC (0x000000800)
+value SQLITE_DIRECTONLY (0x000080000)
 
 // Column types
 value SQLITE_INTEGER (1)
@@ -100,3 +107,19 @@ extern fn sqlite3_backup_step(backup: BACKUP, pages: i32) i32;
 extern fn sqlite3_backup_finish(backup: BACKUP) i32;
 extern fn sqlite3_backup_remaining(backup: BACKUP) i32;
 extern fn sqlite3_backup_pagecount(backup: BACKUP) i32;
+
+extern fn sqlite3_create_function_v2(db: DB, name: cstring, args: i32, encoding: i32, app: ?ptr, func: ?ptr, step: ?ptr, final: ?ptr, destroy: ?ptr) i32;
+extern fn sqlite3_user_data(context: CONTEXT) ?ptr;
+
+extern fn sqlite3_value_type(value: VALUE) i32;
+extern fn sqlite3_value_int64(value: VALUE) i64;
+extern fn sqlite3_value_double(value: VALUE) f64;
+extern fn sqlite3_value_blob(value: VALUE) ?ptr;
+extern fn sqlite3_value_bytes(value: VALUE) i32;
+
+extern fn sqlite3_result_null(context: CONTEXT);
+extern fn sqlite3_result_int64(context: CONTEXT, value: i64);
+extern fn sqlite3_result_double(context: CONTEXT, value: f64);
+extern fn sqlite3_result_text64(context: CONTEXT, text: ptr, bytes: u64, free: ?ptr, encoding: u8);
+extern fn sqlite3_result_blob64(context: CONTEXT, data: ptr, bytes: u64, free: ?ptr);
+extern fn sqlite3_result_error(context: CONTEXT, message: ptr, bytes: i32);

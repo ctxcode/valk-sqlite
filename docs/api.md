@@ -76,6 +76,8 @@ Namespaces: [main](#main)
     + fn close() void
     // Commits the open transaction.
     + fn commit() void !Error
+    // Registers a function that SQL on this connection can call.
+    + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) void !Error
     // Runs one or more statements and reads no rows, for schema changes and scripts.
     + fn exec(sql: String) void !Error
     // Returns every row that is left.
@@ -98,6 +100,8 @@ Namespaces: [main](#main)
     + fn query(sql: String, binds: ?Map[?Value] (null)) void !Error
     // Forgets a savepoint, keeping everything that was done since.
     + fn release(name: String) void !Error
+    // Removes a function that was registered with `create_function`.
+    + fn remove_function(name: String, arg_count: int) void !Error
     // Rolls the open transaction back.
     + fn rollback() void !Error
     // Rolls back to a savepoint, keeping the transaction itself open.

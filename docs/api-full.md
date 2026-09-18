@@ -142,6 +142,8 @@ The SQLite version the program is linked against, such as `3.45.1`.
     + fn close() void
     // Commits the open transaction.
     + fn commit() void !Error
+    // Registers a function that SQL on this connection can call.
+    + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) void !Error
     // Runs one or more statements and reads no rows, for schema changes and scripts.
     + fn exec(sql: String) void !Error
     // Returns every row that is left.
@@ -164,6 +166,8 @@ The SQLite version the program is linked against, such as `3.45.1`.
     + fn query(sql: String, binds: ?Map[?Value] (null)) void !Error
     // Forgets a savepoint, keeping everything that was done since.
     + fn release(name: String) void !Error
+    // Removes a function that was registered with `create_function`.
+    + fn remove_function(name: String, arg_count: int) void !Error
     // Rolls the open transaction back.
     + fn rollback() void !Error
     // Rolls back to a savepoint, keeping the transaction itself open.
@@ -271,6 +275,30 @@ Closes the connection and releases every prepared statement. Further calls throw
 
 Commits the open transaction.
 
+#### create_function
+
+Registers a function that SQL on this connection can call.
+
+`arg_count` is how many arguments it takes, or -1 for any number. The handler is given
+the arguments and returns the result; an error it throws reaches the query as a SQLite
+error, so `db.query` throws `error` with that message.
+
+`deterministic` says that the same arguments always give the same answer, which lets
+SQLite use the function in an index or a `WHERE` clause it optimizes. Leave it off for a
+function that reads a clock, a counter or anything else that changes.
+
+```valk
+db.create_function("slugify", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
+    let text = (args.get(0) !? sqlite.Value.null()).to_string()
+    return sqlite.Value.of(text.lower().replace(" ", "-"))
+}, true) ! panic("%{E.message}")
+
+let slug = db.value("SELECT slugify(title) FROM posts WHERE id = 1") ! panic("%{E.message}")
+```
+
+The handler runs while the query runs, on the same thread, so it may not use the
+connection it was registered on.
+
 #### exec
 
 Runs one or more statements and reads no rows, for schema changes and scripts.
@@ -345,6 +373,10 @@ let users = db.fetch_all() ! panic("%{E.message}")
 #### release
 
 Forgets a savepoint, keeping everything that was done since.
+
+#### remove_function
+
+Removes a function that was registered with `create_function`.
 
 #### rollback
 
