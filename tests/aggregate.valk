@@ -1,0 +1,154 @@
+use sqlite
+use valk.gc
+
+// An aggregate that collects the values and answers with the middle one
+class Median is sqlite.Aggregate {
+    values: Array[float] (.{})
+
+    + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+        let value = args.get(0) !? sqlite.Value.null()
+        if value.is_null() : return
+        this.values.append(value.to_float())
+    }
+    + fn finish() sqlite.Value !sqlite.Error {
+        let values = this.values
+        if values.length == 0 : return sqlite.Value.null()
+        values.sort()
+        return sqlite.Value.of_float(values.get(values.length / 2) !? 0)
+    }
+}
+
+// An aggregate that joins text, to check that several aggregations do not mix
+class Joined is sqlite.Aggregate {
+    parts: Array[String] (.{})
+
+    + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+        this.parts.append((args.get(0) !? sqlite.Value.null()).to_string())
+        // Collect garbage while SQLite holds the stack
+        if this.parts.length % 50 == 0 : gc.collect()
+    }
+    + fn finish() sqlite.Value !sqlite.Error {
+        return sqlite.Value.of(this.parts.join(","))
+    }
+}
+
+class Refuses is sqlite.Aggregate {
+    + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+        throw .error { message: "this row is not allowed" }
+    }
+    + fn finish() sqlite.Value !sqlite.Error {
+        return sqlite.Value.null()
+    }
+}
+
+test "Aggregate functions" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE scores (team TEXT, score REAL)") ! { assert(false) return }
+    db.begin() ! { assert(false) return }
+    let rows = Array[String]{ "a", "a", "a", "b", "b" }
+    let i: uint = 0
+    each rows as team {
+        i++
+        db.run("INSERT INTO scores VALUES (:team, :score)", .{ "team" => team, "score" => i }) ! { assert(false) return }
+    }
+    db.commit() ! { assert(false) return }
+
+    db.create_aggregate("median", 1, fn() sqlite.Aggregate { return Median {} }, true) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    db.create_aggregate("joined", 1, fn() sqlite.Aggregate { return Joined {} }) ! { assert(false) return }
+
+    // Over every row
+    assert((db.value("SELECT median(score) FROM scores") ! { println(E.message) assert(false) return }).to_float() == 3)
+
+    // One aggregation per group, each with its own state
+    let grouped = db.select("SELECT team, median(score) AS middle, joined(team) AS names FROM scores GROUP BY team ORDER BY team") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(grouped.length == 2)
+    let first = grouped.get(0) ! { assert(false) return }
+    assert((first["team"] ?? sqlite.Value.null()).to_string() == "a")
+    assert((first["middle"] ?? sqlite.Value.null()).to_float() == 2)
+    assert((first["names"] ?? sqlite.Value.null()).to_string() == "a,a,a")
+    let second = grouped.get(1) ! { assert(false) return }
+    assert((second["middle"] ?? sqlite.Value.null()).to_float() == 5)
+    assert((second["names"] ?? sqlite.Value.null()).to_string() == "b,b")
+
+    // No rows at all still answers
+    assert((db.value("SELECT median(score) FROM scores WHERE team = 'nobody'") ! { assert(false) return }).is_null())
+
+    // NULL rows are given to the aggregate as NULL
+    db.run("INSERT INTO scores VALUES ('c', NULL)") ! { assert(false) return }
+    assert((db.value("SELECT median(score) FROM scores WHERE team = 'c'") ! { assert(false) return }).is_null())
+
+    // An error thrown by a step reaches the query
+    db.create_aggregate("refuses", 1, fn() sqlite.Aggregate { return Refuses {} }) ! { assert(false) return }
+    db.value("SELECT refuses(score) FROM scores") ! {
+        assert(E.message.contains("not allowed"))
+        assert((db.value("SELECT count(*) FROM scores") ! { assert(false) return }).to_int() == 6)
+        return
+    }
+    assert(false)
+}
+
+test "Aggregate over many rows" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n REAL)") ! { assert(false) return }
+    db.begin() ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 1000 : db.run("INSERT INTO t VALUES (:n)", .{ "n" => i }) ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+
+    db.create_aggregate("median", 1, fn() sqlite.Aggregate { return Median {} }, true) ! { assert(false) return }
+    db.create_aggregate("joined", 1, fn() sqlite.Aggregate { return Joined {} }) ! { assert(false) return }
+    assert((db.value("SELECT median(n) FROM t") ! { assert(false) return }).to_float() == 501)
+    // The joining aggregate collects garbage every fifty rows while it runs
+    assert((db.value("SELECT joined(n) FROM t") ! { println(E.message) assert(false) return }).to_string().length > 3000)
+}
+
+test "Collations" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE words (word TEXT)") ! { assert(false) return }
+    let words = Array[String]{ "Banana", "apple", "Cherry", "date" }
+    each words as word {
+        db.run("INSERT INTO words VALUES (:word)", .{ "word" => word }) ! { assert(false) return }
+    }
+
+    // Ordering that ignores case, which SQLite's own NOCASE only does for ASCII
+    db.create_collation("caseless", fn(left: String, right: String) int {
+        let a = left.lower()
+        let b = right.lower()
+        if a == b : return 0
+        return a < b ? -1 : 1
+    }) ! { println(E.message) assert(false) return }
+
+    let ordered = db.select("SELECT word FROM words ORDER BY word COLLATE caseless") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(ordered.length == 4)
+    assert((ordered.get(0) ! { assert(false) return }["word"] ?? sqlite.Value.null()).to_string() == "apple")
+    assert((ordered.get(1) ! { assert(false) return }["word"] ?? sqlite.Value.null()).to_string() == "Banana")
+    assert((ordered.get(3) ! { assert(false) return }["word"] ?? sqlite.Value.null()).to_string() == "date")
+
+    // Without it, capitals come first
+    let plain = db.select("SELECT word FROM words ORDER BY word") ! { assert(false) return }
+    assert((plain.get(0) ! { assert(false) return }["word"] ?? sqlite.Value.null()).to_string() == "Banana")
+
+    // A collation also works in a comparison and in an index
+    assert((db.value("SELECT count(*) FROM words WHERE word = 'APPLE' COLLATE caseless") ! { assert(false) return }).to_int() == 1)
+    db.exec("CREATE INDEX words_caseless ON words (word COLLATE caseless)") ! { println(E.message) assert(false) return }
+    assert((db.value("SELECT word FROM words INDEXED BY words_caseless WHERE word > 'b' COLLATE caseless ORDER BY word COLLATE caseless") ! {
+        println(E.message)
+        assert(false)
+        return
+    }).to_string() == "Banana")
+}

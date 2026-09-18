@@ -174,6 +174,45 @@ off for anything that reads a clock or a counter.
 An error the handler throws becomes the error of the query. The handler runs while the query
 runs, on the same thread, so it may not use the connection it was registered on.
 
+An aggregate works over the rows of a group. `create_aggregate` takes a function that makes the
+object collecting one aggregation: `step` gets every row and `finish` returns the answer.
+
+```rust
+class Median is sqlite.Aggregate {
+    values: Array[float] (.{})
+    + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+        this.values.append((args.get(0) !? sqlite.Value.null()).to_float())
+    }
+    + fn finish() sqlite.Value !sqlite.Error {
+        if this.values.length == 0 : return sqlite.Value.null()
+        this.values.sort()
+        return sqlite.Value.of_float(this.values.get(this.values.length / 2) !? 0)
+    }
+}
+
+db.create_aggregate("median", 1, fn() sqlite.Aggregate { return Median {} }, true) ! panic("%{E.message}")
+let per_team = db.select("SELECT team, median(score) FROM results GROUP BY team") ! panic("%{E.message}")
+```
+
+Every group gets an object of its own, so `GROUP BY` works as it does for `sum` or `count`.
+
+A collation is an ordering of text, used by `COLLATE`, by a comparison and by an index:
+
+```rust
+db.create_collation("caseless", fn(left: String, right: String) int {
+    let a = left.lower()
+    let b = right.lower()
+    if a == b : return 0
+    return a < b ? -1 : 1
+}) ! panic("%{E.message}")
+
+db.query("SELECT name FROM users ORDER BY name COLLATE caseless") ! panic("%{E.message}")
+```
+
+Unlike SQLite's own `NOCASE`, which only folds ASCII, this one folds whatever `String.lower`
+does. A collation has to be consistent: equal arguments always 0, and the same pair always the
+same answer, or the ordering of a query becomes unpredictable.
+
 ## Backups
 
 ```rust
@@ -245,6 +284,6 @@ against it from `vendor/`.
 
 ## Not supported
 
-Aggregate functions (`xStep`/`xFinal`), collations and the update, commit and authorizer hooks
-are not bound; scalar functions are, see above. Neither are extensions, encryption, and the
-session and serialization interfaces.
+The update, commit and authorizer hooks are not bound, and neither are extensions, encryption,
+and the session and serialization interfaces. Scalar functions, aggregates and collations are,
+see above.

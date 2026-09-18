@@ -127,6 +127,31 @@ The SQLite version the program is linked against, such as `3.45.1`.
 ## Classes for 'main'
 
 ```js
+// What an aggregate function does with the rows it is given.
++ interface Aggregate {
+    // Returns the result, after the last row.
+    + fn finish() Value !Error
+    // Takes one row into the result.
+    + fn step(args: Array[Value]) void !Error
+}
+```
+
+### Aggregate
+
+What an aggregate function does with the rows it is given.
+
+One of these is made for every aggregation: `step` is called once per row and `finish`
+returns the answer. An error thrown by either reaches the query.
+
+#### finish
+
+Returns the result, after the last row.
+
+#### step
+
+Takes one row into the result.
+
+```js
 // One connection to one database.
 + class Connection {
     // Rows changed by the last `INSERT`, `UPDATE` or `DELETE`; for a `SELECT` the number of rows that were read, known once every row has been fetched.
@@ -162,6 +187,10 @@ The SQLite version the program is linked against, such as `3.45.1`.
     + fn close() void
     // Commits the open transaction.
     + fn commit() void !Error
+    // Registers an aggregate function, which SQL can use like `count` or `sum`.
+    + fn create_aggregate(name: String, arg_count: int, new_state: fn()(Aggregate), deterministic: bool (false)) void !Error
+    // Registers a collation: a way of ordering text, used with `COLLATE` and by an index.
+    + fn create_collation(name: String, compare: fn(String, String)(int)) void !Error
     // Registers a function that SQL on this connection can call.
     + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) void !Error
     // Runs one or more statements and reads no rows, for schema changes and scripts.
@@ -294,6 +323,50 @@ Closes the connection and releases every prepared statement. Further calls throw
 #### commit
 
 Commits the open transaction.
+
+#### create_aggregate
+
+Registers an aggregate function, which SQL can use like `count` or `sum`.
+
+`new_state` is called once per aggregation and returns the object that collects the
+rows; `arg_count` is how many arguments the function takes, or -1 for any number.
+
+```valk
+class Median is sqlite.Aggregate {
+    values: Array[float] (.{})
+    + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+        this.values.append((args.get(0) !? sqlite.Value.null()).to_float())
+    }
+    + fn finish() sqlite.Value !sqlite.Error {
+        if this.values.length == 0 : return sqlite.Value.null()
+        this.values.sort()
+        return sqlite.Value.of_float(this.values.get(this.values.length / 2) !? 0)
+    }
+}
+
+db.create_aggregate("median", 1, fn() sqlite.Aggregate { return Median {} }) ! panic("%{E.message}")
+let middle = db.value("SELECT median(score) FROM results") ! panic("%{E.message}")
+```
+
+#### create_collation
+
+Registers a collation: a way of ordering text, used with `COLLATE` and by an index.
+
+`compare` returns a negative number when `left` sorts first, 0 when they are equal, and a
+positive number when `right` sorts first. It must be consistent, or the ordering of a
+query becomes unpredictable: equal arguments always 0, and the same pair always the same
+answer.
+
+```valk
+db.create_collation("nocase_unicode", fn(left: String, right: String) int {
+    let a = left.lower()
+    let b = right.lower()
+    if a == b : return 0
+    return a < b ? -1 : 1
+}) ! panic("%{E.message}")
+
+db.query("SELECT name FROM users ORDER BY name COLLATE nocase_unicode") ! panic("%{E.message}")
+```
 
 #### create_function
 

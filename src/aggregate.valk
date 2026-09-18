@@ -1,0 +1,203 @@
+// Aggregate functions and collations written in Valk.
+//
+// An aggregate keeps state while it walks the rows, so every aggregation gets an object of its
+// own. SQLite hands out a few bytes of scratch per aggregation (`sqlite3_aggregate_context`),
+// which is used to hold the id of that object.
+
+global registered_aggregates: HashMap[uint, AggregateFunction] (.{})
+global live_aggregates: HashMap[uint, Aggregate] (.{})
+global next_aggregate_id: uint (1)
+global registered_collations: HashMap[uint, CollationFunction] (.{})
+
+class AggregateFunction {
+    name: String
+    new_state: fn()(Aggregate)
+}
+
+class CollationFunction {
+    name: String
+    compare: fn(String, String)(int)
+}
+
+/// What an aggregate function does with the rows it is given.
+///
+/// One of these is made for every aggregation: `step` is called once per row and `finish`
+/// returns the answer. An error thrown by either reaches the query.
++ interface Aggregate {
+    /// Takes one row into the result.
+    + fn step(args: Array[Value]) !Error;
+    /// Returns the result, after the last row.
+    + fn finish() Value !Error;
+}
+
+extend Connection {
+    aggregate_ids: Array[uint] (.{})
+    collation_ids: Array[uint] (.{})
+
+    /// Registers an aggregate function, which SQL can use like `count` or `sum`.
+    ///
+    /// `new_state` is called once per aggregation and returns the object that collects the
+    /// rows; `arg_count` is how many arguments the function takes, or -1 for any number.
+    ///
+    /// ```valk
+    /// class Median is sqlite.Aggregate {
+    ///     values: Array[float] (.{})
+    ///     + fn step(args: Array[sqlite.Value]) !sqlite.Error {
+    ///         this.values.append((args.get(0) !? sqlite.Value.null()).to_float())
+    ///     }
+    ///     + fn finish() sqlite.Value !sqlite.Error {
+    ///         if this.values.length == 0 : return sqlite.Value.null()
+    ///         this.values.sort()
+    ///         return sqlite.Value.of_float(this.values.get(this.values.length / 2) !? 0)
+    ///     }
+    /// }
+    ///
+    /// db.create_aggregate("median", 1, fn() sqlite.Aggregate { return Median {} }) ! panic("%{E.message}")
+    /// let middle = db.value("SELECT median(score) FROM results") ! panic("%{E.message}")
+    /// ```
+    + fn create_aggregate(name: String, arg_count: int, new_state: fn()(Aggregate), deterministic: bool (false)) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+
+        let id = next_function_id++
+        registered_aggregates.set(id, AggregateFunction { name: name, new_state: new_state })
+
+        let encoding: i32 = SQLITE_UTF8
+        if deterministic : encoding |= SQLITE_DETERMINISTIC
+        let step: fnptr(CONTEXT, i32, ptr)() = call_aggregate_step
+        let final: fnptr(CONTEXT)() = call_aggregate_final
+        let code = sqlite3_create_function_v2(this.db, name.data_cstring, arg_count.to(i32), encoding,
+            id.@cast(ptr), null, step.@cast(ptr), final.@cast(ptr), null)
+        if code != SQLITE_OK {
+            registered_aggregates.remove(id)
+            this.fail(code, "CREATE AGGREGATE " + name)
+        }
+        this.aggregate_ids.append(id)
+    }
+
+    /// Registers a collation: a way of ordering text, used with `COLLATE` and by an index.
+    ///
+    /// `compare` returns a negative number when `left` sorts first, 0 when they are equal, and a
+    /// positive number when `right` sorts first. It must be consistent, or the ordering of a
+    /// query becomes unpredictable: equal arguments always 0, and the same pair always the same
+    /// answer.
+    ///
+    /// ```valk
+    /// db.create_collation("nocase_unicode", fn(left: String, right: String) int {
+    ///     let a = left.lower()
+    ///     let b = right.lower()
+    ///     if a == b : return 0
+    ///     return a < b ? -1 : 1
+    /// }) ! panic("%{E.message}")
+    ///
+    /// db.query("SELECT name FROM users ORDER BY name COLLATE nocase_unicode") ! panic("%{E.message}")
+    /// ```
+    + fn create_collation(name: String, compare: fn(String, String)(int)) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+
+        let id = next_function_id++
+        registered_collations.set(id, CollationFunction { name: name, compare: compare })
+
+        let trampoline: fnptr(?ptr, i32, ptr, i32, ptr)(i32) = call_collation
+        let code = sqlite3_create_collation_v2(this.db, name.data_cstring, SQLITE_UTF8, id.@cast(ptr), trampoline.@cast(ptr), null)
+        if code != SQLITE_OK {
+            registered_collations.remove(id)
+            this.fail(code, "CREATE COLLATION " + name)
+        }
+        this.collation_ids.append(id)
+    }
+
+    // Frees what this connection registered; called when it closes
+    fn release_aggregates() {
+        each this.aggregate_ids as id {
+            registered_aggregates.remove(id)
+        }
+        this.aggregate_ids.clear()
+        each this.collation_ids as id {
+            registered_collations.remove(id)
+        }
+        this.collation_ids.clear()
+    }
+}
+
+// One row of an aggregation
+fn call_aggregate_step(context: CONTEXT, arg_count: i32, args: ptr) {
+    @unsafe
+    let state = aggregate_state(context) ! {
+        set_function_error(context, E.message)
+        return
+    }
+    let values = Array[Value].new(arg_count.to(uint))
+    let i: uint = 0
+    while i < arg_count.to(uint) {
+        let value = args.@cast(*[?VALUE])[i]
+        if !isset(value) : values.append(Value.null())
+        else : values.append(read_sql_value(value))
+        i++
+    }
+    state.step(values) ! {
+        set_function_error(context, E.message)
+        return
+    }
+}
+
+// The end of an aggregation: the result, and the state is dropped
+fn call_aggregate_final(context: CONTEXT) {
+    @unsafe
+    let state = aggregate_state(context) ! {
+        set_function_error(context, E.message)
+        return
+    }
+    let slot = sqlite3_aggregate_context(context, 0)
+    if isset(slot) {
+        let id = slot.@cast(*uint)[0]
+        live_aggregates.remove(id)
+    }
+    let result = state.finish() ! {
+        set_function_error(context, E.message)
+        return
+    }
+    set_function_result(context, result)
+}
+
+// The object collecting this aggregation, made on the first row it is asked for
+fn aggregate_state(context: CONTEXT) Aggregate !Error {
+    @unsafe
+    let data = sqlite3_user_data(context)
+    if !isset(data) : throw .error { message: "This aggregate function is not registered" }
+    let entry = registered_aggregates.get(data.@cast(uint)) ! {
+        throw .error { message: "This aggregate function is no longer registered" }
+    }
+
+    // Eight bytes of scratch per aggregation, which hold the id of the state object. A `FINAL`
+    // over no rows at all gets no scratch, and answers from a state of its own.
+    let slot = sqlite3_aggregate_context(context, size_of(uint).to(i32))
+    if !isset(slot) : return entry.new_state()
+
+    let id = slot.@cast(*uint)[0]
+    if id != 0 {
+        return live_aggregates.get(id) ! {
+            throw .error { message: "The state of this aggregation is gone" }
+        }
+    }
+
+    let state = entry.new_state()
+    id = next_aggregate_id++
+    live_aggregates.set(id, state)
+    slot.@cast(*uint)[0] = id
+    return state
+}
+
+// Two pieces of text, ordered by a closure
+fn call_collation(app: ?ptr, left_length: i32, left_data: ptr, right_length: i32, right_data: ptr) i32 {
+    @unsafe
+    if !isset(app) : return 0
+    let entry = registered_collations.get(app.@cast(uint)) ! return 0
+    let left = String.copy_from_ptr(left_data, left_length.to(uint))
+    let right = String.copy_from_ptr(right_data, right_length.to(uint))
+    let result = entry.compare(left, right)
+    if result < 0 : return -1
+    if result > 0 : return 1
+    return 0
+}

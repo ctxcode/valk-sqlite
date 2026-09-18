@@ -123,3 +123,6 @@ extern fn sqlite3_result_double(context: CONTEXT, value: f64);
 extern fn sqlite3_result_text64(context: CONTEXT, text: ptr, bytes: u64, free: ?ptr, encoding: u8);
 extern fn sqlite3_result_blob64(context: CONTEXT, data: ptr, bytes: u64, free: ?ptr);
 extern fn sqlite3_result_error(context: CONTEXT, message: ptr, bytes: i32);
+
+extern fn sqlite3_aggregate_context(context: CONTEXT, bytes: i32) ?ptr;
+extern fn sqlite3_create_collation_v2(db: DB, name: cstring, encoding: i32, app: ?ptr, compare: ?ptr, destroy: ?ptr) i32;

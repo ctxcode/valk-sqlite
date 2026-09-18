@@ -222,6 +222,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         this.statements.clear()
         this.order.clear()
         this.release_functions()
+        this.release_aggregates()
         this.current = null
         sqlite3_close_v2(this.db)
     }

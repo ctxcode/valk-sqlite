@@ -43,6 +43,16 @@ Namespaces: [main](#main)
 ## Classes for 'main'
 
 ```js
+// What an aggregate function does with the rows it is given.
++ interface Aggregate {
+    // Returns the result, after the last row.
+    + fn finish() Value !Error
+    // Takes one row into the result.
+    + fn step(args: Array[Value]) void !Error
+}
+```
+
+```js
 // One connection to one database.
 + class Connection {
     // Rows changed by the last `INSERT`, `UPDATE` or `DELETE`; for a `SELECT` the number of rows that were read, known once every row has been fetched.
@@ -78,6 +88,10 @@ Namespaces: [main](#main)
     + fn close() void
     // Commits the open transaction.
     + fn commit() void !Error
+    // Registers an aggregate function, which SQL can use like `count` or `sum`.
+    + fn create_aggregate(name: String, arg_count: int, new_state: fn()(Aggregate), deterministic: bool (false)) void !Error
+    // Registers a collation: a way of ordering text, used with `COLLATE` and by an index.
+    + fn create_collation(name: String, compare: fn(String, String)(int)) void !Error
     // Registers a function that SQL on this connection can call.
     + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) void !Error
     // Runs one or more statements and reads no rows, for schema changes and scripts.
