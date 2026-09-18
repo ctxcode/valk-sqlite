@@ -30,8 +30,8 @@ valk build ./src --target win-x64 -L .          # finds sqlite3.lib here
 another system needs `libsqlite3.tbd` from the macOS SDK in a `-L` directory the same way;
 building on macOS itself needs nothing.
 
-This is the one valk package with a dependency outside valk itself: SQLite is 200k lines of C,
-and a database file format is not something to reimplement.
+This package binds SQLite rather than reimplementing it: it is 200k lines of C and a database
+file format, so a program that uses this package links against the SQLite on the system.
 
 ## Install
 
