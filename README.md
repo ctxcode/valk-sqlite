@@ -235,6 +235,9 @@ API stays there for the paths where every allocation counts.
 
 ## Development
 
+`make deps` fetches the `valk-sql` package the `database()` adapter needs; the tests build
+against it from `vendor/`.
+
 `make test` runs the suite, which needs nothing but SQLite; databases are written under
 `tests/tmp`. `make example` builds and runs the example, `make lint` checks the sources and
 `make docs` regenerates the API documentation. Override the compiler with
