@@ -1,6 +1,6 @@
 {
     "name": "sqlite",
-    "use": "0.7.3",
+    "use": "0.7.4",
     "require": {
         "valk": {
             "min": "0.7.3"
