@@ -9,9 +9,9 @@
     "dependencies": {
         "sql": {
             "src": "github.com/ctxcode/valk-sql",
-            "version": "0.2.x",
-            "current": "0.2.2",
-            "current_hash": "dc6c9293a27fa365a879ce52fef43e2e8ba7ce45"
+            "version": "0.3.x",
+            "current": "0.3.0",
+            "current_hash": "6b972801a9d283d1fe1e9c197d804fc1453522e4"
         }
     }
 }
