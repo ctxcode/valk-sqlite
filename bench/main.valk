@@ -49,7 +49,7 @@ fn bench_insert_sql() {
     db.begin() !!
     let i: uint = 0
     while i++ < ROWS {
-        db.exec("INSERT INTO t (name, n) VALUES (?, ?)", .{ sql.Value.of("row"), sql.Value.of_int(i.to(int)) }) !!
+        db.exec("INSERT INTO t (name, n) VALUES (:name, :n)", .{ "name" => "row", "n" => i }) !!
     }
     db.commit() !!
     report("insert, through sql", start)
@@ -115,7 +115,7 @@ fn bench_select_one_sql() {
     let total: int = 0
     let i: uint = 0
     while i++ < ROWS {
-        total += (db.value("SELECT n FROM t WHERE id = ?", .{ sql.Value.of_int(i.to(int)) }) !!).to_int()
+        total += (db.value("SELECT n FROM t WHERE id = :id", .{ "id" => i }) !!).to_int()
     }
     report("select 1 row x " + ROWS + ", through sql", start)
     if total == 0 : println("no rows?")

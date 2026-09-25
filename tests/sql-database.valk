@@ -13,19 +13,19 @@ test "Through the sql package" {
         return
     }
 
-    // Values are bound through the `?` placeholders
-    let changed = db.exec("INSERT INTO users (name, age, active) VALUES (?, ?, ?)", .{
-        sql.Value.of("Ada")
-        sql.Value.of_int(36)
-        sql.Value.of_bool(true)
+    // Values are bound by name
+    let changed = db.exec("INSERT INTO users (name, age, active) VALUES (:name, :age, :active)", .{
+        "name" => "Ada"
+        "age" => 36
+        "active" => true
     }) ! { println(E.message) assert(false) return }
     assert(changed == 1)
     assert(db.last_insert_id() == 1)
 
-    db.exec("INSERT INTO users (name, age, active) VALUES (?, ?, ?)", .{
-        sql.Value.of("Bob")
-        sql.Value.of_int(20)
-        sql.Value.of_bool(false)
+    db.exec("INSERT INTO users (name, age, active) VALUES (:name, :age, :active)", .{
+        "name" => "Bob"
+        "age" => 20
+        "active" => false
     }) ! { assert(false) return }
 
     // Reading
@@ -38,14 +38,14 @@ test "Through the sql package" {
     assert((first.get("avatar") !? sql.Value.of("x")).is_null())
 
     // One row, one value
-    let one = db.one("SELECT * FROM users WHERE name = ?", .{ sql.Value.of("Bob") }) ! { assert(false) return }
+    let one = db.one("SELECT * FROM users WHERE name = :name", .{ "name" => "Bob" }) ! { assert(false) return }
     assert(isset(one))
     if isset(one) : assert((one.get("age") !? sql.Value.null()).to_int() == 20)
-    assert(!isset(db.one("SELECT * FROM users WHERE name = ?", .{ sql.Value.of("nobody") }) ! { assert(false) return }))
+    assert(!isset(db.one("SELECT * FROM users WHERE name = :name", .{ "name" => "nobody" }) ! { assert(false) return }))
     assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).to_int() == 2)
 
     // Blobs keep every byte
-    db.exec("UPDATE users SET avatar = ? WHERE id = ?", .{ sql.Value.of_blob("\x00\xff\x00"), sql.Value.of_int(1) }) ! { assert(false) return }
+    db.exec("UPDATE users SET avatar = :avatar WHERE id = :id", .{ "avatar" => sql.Value.of_blob("\x00\xff\x00"), "id" => 1 }) ! { assert(false) return }
     let avatar = db.value("SELECT avatar FROM users WHERE id = 1") ! { assert(false) return }
     assert(avatar.is_blob())
     assert(avatar.to_string().length == 3)
@@ -78,8 +78,8 @@ test "The builder against a real database" {
 
     let query = db.select("title, views")
     query.from("posts")
-    query.where("published = ?", .{ sql.Value.of_bool(true) })
-    query.where("views > ?", .{ sql.Value.of_int(5) })
+    query.where("published", true)
+    query.where("views", ">", 5)
     query.order_by("views DESC")
     let rows = query.all() ! { println(E.message) assert(false) return }
     assert(rows.length == 2)
@@ -90,10 +90,10 @@ test "The builder against a real database" {
     assert(in_rows.length == 2)
 
     // Updates and deletes report what they changed
-    let updated = db.update("posts").set_expression("views", "views + ?", .{ sql.Value.of_int(1) }).where("published = ?", .{ sql.Value.of_bool(true) }).run() ! { assert(false) return }
+    let updated = db.update("posts").set_expression("views", "views + :step", .{ "step" => 1 }).where("published", true).run() ! { assert(false) return }
     assert(updated == 2)
-    assert((db.select("views").from("posts").where("title = ?", .{ sql.Value.of("first") }).value() ! { assert(false) return }).to_int() == 11)
-    let deleted = db.delete_from("posts").where("views < ?", .{ sql.Value.of_int(5) }).run() ! { assert(false) return }
+    assert((db.select("views").from("posts").where("title", "first").value() ! { assert(false) return }).to_int() == 11)
+    let deleted = db.delete_from("posts").where("views", "<", 5).run() ! { assert(false) return }
     assert(deleted == 1)
     assert((db.value("SELECT count(*) FROM posts") ! { assert(false) return }).to_int() == 2)
 
@@ -118,7 +118,7 @@ test "Rows into classes, from a real database" {
     let db = sqlite.database(memory() ! { assert(false) return })
     defer db.close()
     db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, views INTEGER, published INTEGER)") ! { assert(false) return }
-    db.exec("INSERT INTO posts (title, views, published) VALUES (?, ?, ?)", .{ sql.Value.of("first"), sql.Value.of_int(10), sql.Value.of_bool(true) }) ! { assert(false) return }
+    db.exec("INSERT INTO posts (title, views, published) VALUES (:title, :views, :published)", .{ "title" => "first", "views" => 10, "published" => true }) ! { assert(false) return }
 
     let rows = db.all("SELECT * FROM posts") ! { assert(false) return }
     // SQLite stores a bool as 1 or 0, so the column is named to read it back as a bool
@@ -171,8 +171,8 @@ test "Migrations on a real database" {
     assert((migrator.applied() ! { assert(false) return }).length == 2)
 
     // The tables are really there
-    db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! { println(E.message) assert(false) return }
-    db.exec("INSERT INTO posts (user_id, title) VALUES (?, ?)", .{ sql.Value.of_int(1), sql.Value.of("hello") }) ! { assert(false) return }
+    db.exec("INSERT INTO users (name) VALUES (:name)", .{ "name" => "Ada" }) ! { println(E.message) assert(false) return }
+    db.exec("INSERT INTO posts (user_id, title) VALUES (:user, :title)", .{ "user" => 1, "title" => "hello" }) ! { assert(false) return }
     assert((db.value("SELECT count(*) FROM posts") ! { assert(false) return }).to_int() == 1)
 
     // Running again does nothing, even in a new process with a new migrator
@@ -237,26 +237,26 @@ test "Complex conditions against a real database" {
     }
 
     // name, role, score, active
-    let rows = Array[Array[sql.Value]]{
-        .{ sql.Value.of("ada"),   sql.Value.of("admin"),  sql.Value.of_int(10),  sql.Value.of_bool(true) }
-        .{ sql.Value.of("bob"),   sql.Value.of("member"), sql.Value.of_int(150), sql.Value.of_bool(true) }
-        .{ sql.Value.of("cid"),   sql.Value.of("member"), sql.Value.of_int(20),  sql.Value.of_bool(true) }
-        .{ sql.Value.of("dora"),  sql.Value.of("admin"),  sql.Value.of_int(30),  sql.Value.of_bool(false) }
-        .{ sql.Value.of("eve"),   sql.Value.of("owner"),  sql.Value.null(),      sql.Value.of_bool(true) }
-        .{ sql.Value.of("frank"), sql.Value.of("owner"),  sql.Value.of_int(5),   sql.Value.of_bool(true) }
+    let rows = Array[Map[sql.Value]]{
+        .{ "name" => "ada",   "role" => "admin",  "score" => 10,               "active" => true }
+        .{ "name" => "bob",   "role" => "member", "score" => 150,              "active" => true }
+        .{ "name" => "cid",   "role" => "member", "score" => 20,               "active" => true }
+        .{ "name" => "dora",  "role" => "admin",  "score" => 30,               "active" => false }
+        .{ "name" => "eve",   "role" => "owner",  "score" => sql.Value.null(), "active" => true }
+        .{ "name" => "frank", "role" => "owner",  "score" => 5,                "active" => true }
     }
     each rows as row {
-        db.exec("INSERT INTO users (name, role, score, active) VALUES (?, ?, ?, ?)", row) ! { assert(false) return }
+        db.exec("INSERT INTO users (name, role, score, active) VALUES (:name, :role, :score, :active)", row) ! { assert(false) return }
     }
 
     // Active users who are either an admin or scored above 100.
     // Without the group this would also return the inactive admin.
     let found = db.select("name")
         .from("users")
-        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where("active", true)
         .where_group(fn(w: sql.Conditions) {
-            w.where("role = ?", .{ sql.Value.of("admin") })
-            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+            w.where("role", "admin")
+            w.or_where("score", ">", 100)
         })
         .all() ! { println(E.message) assert(false) return }
     assert(names_of(found) == "ada,bob")
@@ -264,7 +264,7 @@ test "Complex conditions against a real database" {
     // The same conditions without the group: AND binds tighter, so dora comes along
     let ungrouped = db.select("name")
         .from("users")
-        .where("active = ? AND role = ? OR score > ?", .{ sql.Value.of_bool(true), sql.Value.of("admin"), sql.Value.of_int(100) })
+        .where_raw("active = :active AND role = :role OR score > :score", .{ "active" => true, "role" => "admin", "score" => 100 })
         .all() ! { assert(false) return }
     assert(names_of(ungrouped) == "ada,bob")
 
@@ -273,13 +273,13 @@ test "Complex conditions against a real database" {
     let either = db.select("name")
         .from("users")
         .where_group(fn(w: sql.Conditions) {
-            w.where("role = ?", .{ sql.Value.of("admin") })
-            w.where("active = ?", .{ sql.Value.of_bool(true) })
+            w.where("role", "admin")
+            w.where("active", true)
         })
         .or_where_group(fn(w: sql.Conditions) {
-            w.where("role = ?", .{ sql.Value.of("owner") })
+            w.where("role", "owner")
             w.group(fn(inner: sql.Conditions) {
-                inner.where("score > ?", .{ sql.Value.of_int(4) })
+                inner.where("score", ">", 4)
                 inner.or_where_null("score")
             })
         })
@@ -292,7 +292,7 @@ test "Complex conditions against a real database" {
         .from("users")
         .where_in("role", .{ sql.Value.of("admin"), sql.Value.of("owner") })
         .where_not_in("name", .{ sql.Value.of("dora") })
-        .or_where("score > ?", .{ sql.Value.of_int(100) })
+        .or_where("score", ">", 100)
         .all() ! { assert(false) return }
     assert(names_of(lists) == "ada,bob,eve,frank")
 
@@ -300,10 +300,10 @@ test "Complex conditions against a real database" {
     let count = db.select("count(*) AS n")
         .from("users")
         .where_group(fn(w: sql.Conditions) {
-            w.where("score >= ?", .{ sql.Value.of_int(10) })
+            w.where("score", ">=", 10)
             w.or_where_null("score")
         })
-        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where("active", true)
         .value() ! { println(E.message) assert(false) return }
     assert(count.to_int() == 4) // ada, bob, cid, eve
 
@@ -311,8 +311,8 @@ test "Complex conditions against a real database" {
     let grouped = db.select("role, count(*) AS n")
         .from("users")
         .group_by("role")
-        .having("count(*) > ?", .{ sql.Value.of_int(2) })
-        .or_having("role = ?", .{ sql.Value.of("admin") })
+        .having("count(*)", ">", 2)
+        .or_having("role", "admin")
         .order_by("role")
         .all() ! { println(E.message) assert(false) return }
     assert(grouped.length == 1)
@@ -321,8 +321,8 @@ test "Complex conditions against a real database" {
     // An UPDATE with an OR touches exactly the rows it should
     let changed = db.update("users")
         .set("active", sql.Value.of_bool(false))
-        .where("role = ?", .{ sql.Value.of("owner") })
-        .or_where("score < ?", .{ sql.Value.of_int(15) })
+        .where("role", "owner")
+        .or_where("score", "<", 15)
         .run() ! { println(E.message) assert(false) return }
     assert(changed == 3) // ada (10), eve and frank (owners)
     assert((db.value("SELECT count(*) FROM users WHERE active = 1") ! { assert(false) return }).to_int() == 2)
@@ -361,15 +361,15 @@ test "Upserts, pages and counts against a real database" {
     db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, published INTEGER)") ! { assert(false) return }
     let i: uint = 0
     while i++ < 25 {
-        db.exec("INSERT INTO posts (title, published) VALUES (?, ?)", .{
-            sql.Value.of("post " + i)
-            sql.Value.of_bool(i % 5 != 0)
+        db.exec("INSERT INTO posts (title, published) VALUES (:title, :published)", .{
+            "title" => "post " + i
+            "published" => i % 5 != 0
         }) ! { assert(false) return }
     }
 
     let page_two = db.select("title")
         .from("posts")
-        .where("published = ?", .{ sql.Value.of_bool(true) })
+        .where("published", true)
         .order_by("id")
         .page(2, 10)
         .all() ! { println(E.message) assert(false) return }
@@ -380,7 +380,7 @@ test "Upserts, pages and counts against a real database" {
     // The count of the same query, without its page
     let total = db.select("title")
         .from("posts")
-        .where("published = ?", .{ sql.Value.of_bool(true) })
+        .where("published", true)
         .order_by("id")
         .page(2, 10)
         .count() ! { println(E.message) assert(false) return }
@@ -392,7 +392,7 @@ test "Upserts, pages and counts against a real database" {
     let with_comments = db.select("posts.title, count(comments.id) AS comments")
         .from("posts")
         .left_join("comments", "comments.post_id = posts.id")
-        .where("posts.id < ?", .{ sql.Value.of_int(4) })
+        .where("posts.id", "<", 4)
         .group_by("posts.id")
         .order_by("posts.id")
         .all() ! { println(E.message) assert(false) return }
@@ -409,8 +409,8 @@ test "A transaction without a closure, against a real database" {
 
     // Work that commits
     let tx = db.begin_transaction() ! { println(E.message) assert(false) return }
-    tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = 1", .{ sql.Value.of_int(40) }) ! { assert(false) return }
-    tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = 2", .{ sql.Value.of_int(40) }) ! { assert(false) return }
+    tx.exec("UPDATE accounts SET balance = balance - :amount WHERE id = 1", .{ "amount" => 40 }) ! { assert(false) return }
+    tx.exec("UPDATE accounts SET balance = balance + :amount WHERE id = 2", .{ "amount" => 40 }) ! { assert(false) return }
     tx.commit() ! { assert(false) return }
     assert((db.value("SELECT balance FROM accounts WHERE id = 1") ! { assert(false) return }).to_int() == 60)
 
@@ -442,7 +442,7 @@ test "Chunking a real table" {
     }
     db.begin() ! { assert(false) return }
     let i: uint = 0
-    while i++ < 250 : db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("user " + i) }) ! { assert(false) return }
+    while i++ < 250 : db.exec("INSERT INTO users (name) VALUES (:name)", .{ "name" => "user " + i }) ! { assert(false) return }
     db.commit() ! { assert(false) return }
 
     // Pages of 100, the last one short
@@ -458,7 +458,7 @@ test "Chunking a real table" {
     // Walking by id, writing to every row as it goes: the writes would have ended a plain walk
     let updated = db.select().from("users").chunk_by_id("id", 60, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
         each rows as row {
-            db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+            db.exec("UPDATE users SET checked = 1 WHERE id = :id", .{ "id" => row.get("id") !? sql.Value.null() }) !>
         }
         return true
     }) ! { println(E.message) assert(false) return }
@@ -466,7 +466,7 @@ test "Chunking a real table" {
     assert((db.value("SELECT count(*) FROM users WHERE checked = 1") ! { assert(false) return }).to_int() == 250)
 
     // The conditions of the query are kept on every page
-    let checked = db.select().from("users").where("name LIKE ?", .{ sql.Value.of("user 1%") }).chunk_by_id("id", 25, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    let checked = db.select().from("users").where("name", "like", "user 1%").chunk_by_id("id", 25, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
         return true
     }) ! { println(E.message) assert(false) return }
     // user 1, 10-19, 100-199: 111 of them
@@ -486,4 +486,29 @@ test "Chunking a real table" {
     }) ! { println(E.message) assert(false) return }
     assert(walked == 5)
     assert((names.get(0) !? "") == "user 1")
+}
+
+test "valk-sql: lists and where forms against SQLite" {
+    let con = sqlite.open(":memory:") ! { println(E.message) assert(false) return }
+    let db = sqlite.database(con)
+    defer db.close()
+    db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, gone INTEGER)") ! { assert(false) return }
+    let i: uint = 0
+    while i++ < 2000 : db.exec("INSERT INTO items (name, gone) VALUES (:name, :gone)", .{ "name" => "item " + i, "gone" => i % 2 == 0 ? sql.Value.of_int(1) : sql.Value.null() }) ! { assert(false) return }
+
+    // A thousand ids, one placeholder in the statement
+    let ids = Array[int]{}
+    while ids.length < 1000 : ids.append((ids.length * 2 + 1).to(int))
+    let counted = db.value("SELECT count(*) FROM items WHERE id IN (:ids)", .{ "ids" => ids }) ! { println(E.message) assert(false) return }
+    assert(counted.to_int() == 1000)
+    let none = Array[int]{}
+    assert((db.value("SELECT count(*) FROM items WHERE id IN (:ids)", .{ "ids" => none }) ! { assert(false) return }).to_int() == 0)
+
+    // The builder forms
+    let kept = db.select("count(*) AS n").from("items").where("gone", null).where("id", "<=", 10).value() ! { println(E.message) assert(false) return }
+    assert(kept.to_int() == 5)
+    let listed = db.select("count(*) AS n").from("items").where("id", Array[int]{ 1, 2, 3 }).value() ! { assert(false) return }
+    assert(listed.to_int() == 3)
+    let liked = db.select("count(*) AS n").from("items").where("name", "like", "item 1%").where("gone", "!=", null).value() ! { assert(false) return }
+    assert(liked.to_int() == 555)
 }
