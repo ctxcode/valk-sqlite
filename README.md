@@ -6,13 +6,13 @@ database runs inside your program: no server, no port, no credentials, one file.
 
 Requires Valk 0.7.3 or newer, and SQLite 3.24 or newer on the system:
 
-| system | install | tested |
-| --- | --- | --- |
-| Debian, Ubuntu | `apt install libsqlite3-dev` | |
-| Fedora, RHEL | `dnf install sqlite-devel` | |
-| Arch | `pacman -S sqlite` | the whole suite, on 3.53 |
-| macOS | already there; the Command Line Tools carry the stub the linker wants | the whole suite, on Sonoma 14.8 |
-| Windows | `sqlite3.dll` next to the program, and `sqlite3.lib` to link against | the whole suite, under Wine |
+| system | install |
+| --- | --- |
+| Debian, Ubuntu | `apt install libsqlite3-dev` |
+| Fedora, RHEL | `dnf install sqlite-devel` |
+| Arch | `pacman -S sqlite` |
+| macOS | already there, with the Command Line Tools |
+| Windows | `sqlite3.dll` next to the program, and `sqlite3.lib` to link against |
 
 On Windows, SQLite ships a DLL but no import library. Make one from the `.def` in the same
 download and point the build at it:
@@ -29,9 +29,6 @@ valk build ./src --target win-x64 -L .          # finds sqlite3.lib here
 `sqlite3.dll` then has to sit next to the program when it runs. Cross-compiling for macOS from
 another system needs `libsqlite3.tbd` from the macOS SDK in a `-L` directory the same way;
 building on macOS itself needs nothing.
-
-This package binds SQLite rather than reimplementing it: it is 200k lines of C and a database
-file format, so a program that uses this package links against the SQLite on the system.
 
 ## Install
 
@@ -75,7 +72,7 @@ while (db.fetch_row(row) ! panic("%{E.message}")) {
 }
 ```
 
-One map is reused for every row, so a long result costs one allocation rather than one per row.
+The same map is filled again for every row.
 
 ## Values
 
@@ -285,8 +282,7 @@ db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada"
 let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
 ```
 
-The connection itself keeps working as before: the wrapper is a view of it, and the driver's own
-API stays there for the paths where every allocation counts.
+The connection's own API stays available next to it.
 
 ## Development
 
