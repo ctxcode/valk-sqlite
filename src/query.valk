@@ -32,7 +32,6 @@ extend Connection {
     /// let users = db.fetch_all() ! panic("%{E.message}")
     /// ```
     + fn query(sql: String, binds: ?Map[?Value] (null)) !Error {
-        @unsafe
         if this.closed : throw .closed { message: "The connection is closed" }
         this.stop()
         this.affected_rows = 0
@@ -46,7 +45,7 @@ extend Connection {
         }
         if this.debug : println("QUERY: " + sql)
 
-        let statement = this.prepare(sql) ! {
+        let statement = this.prepare_cached(sql) ! {
             this.clear_binds()
             throw E
         }
@@ -56,7 +55,73 @@ extend Connection {
             throw E
         }
         this.clear_binds()
+        this.start(statement) !>
+    }
 
+    /// Prepares a statement to run many times, with other values each time.
+    ///
+    /// The SQL is parsed once, here; running the statement only binds its values. Values go in
+    /// by name, `:name`, `@name` or `$name`; a `?` placeholder throws `syntax`.
+    ///
+    /// ```valk
+    /// let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+    /// defer find.close()
+    /// let users = find.select(.{ "id" => 1 }) ! panic("%{E.message}")
+    /// ```
+    + fn prepare(sql: String) Statement !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        let statement = this.prepare_statement(sql) !>
+        let stmt = statement.stmt
+        let count = sqlite3_bind_parameter_count(stmt)
+        let names = Array[String].new(count.to(uint))
+        let i: i32 = 1
+        while i <= count {
+            let name = sqlite3_bind_parameter_name(stmt, i++)
+            if !isset(name) || name.to(String).starts_with("?") {
+                statement.finalize()
+                throw .syntax { message: "A prepared statement takes its values by name: use :name instead of ?", sql: sql }
+            }
+            let text: String = name
+            names.append(text.range(1, text.length - 1))
+        }
+        statement.names = names
+        return statement
+    }
+
+    // Runs a statement from `prepare` with `values` bound to its names
+    fn query_prepared(statement: Statement, values: ?Map[?Value]) !Error {
+        @unsafe
+        if this.closed || statement.finalized : throw .closed { message: "The statement is closed", sql: statement.sql }
+        this.stop()
+        this.affected_rows = 0
+        this.query_serial++
+        this.column_names.clear()
+        if this.debug : println("QUERY: " + statement.sql)
+
+        sqlite3_reset(statement.stmt)
+        let names = statement.names
+        if isset(names) {
+            each names as name, i {
+                let given = values ?! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement.sql }
+                let value = given.get(name) ! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement.sql }
+                let index = (i + 1).to(i32)
+                if !isset(value) {
+                    sqlite3_bind_null(statement.stmt, index)
+                    continue
+                }
+                bind_value(statement.stmt, index, value) ! {
+                    statement.reset()
+                    throw E { sql: statement.sql }
+                }
+            }
+        }
+        this.start(statement) !>
+    }
+
+    // Takes the first step of a bound statement
+    fn start(statement: Statement) !Error {
+        @unsafe
         this.current = statement
         let step = sqlite3_step(statement.stmt)
         if step == SQLITE_ROW {
@@ -75,7 +140,7 @@ extend Connection {
         this.state = STATE_IDLE
         this.current = null
         statement.reset()
-        this.fail(step, sql)
+        this.fail(step, statement.sql)
     }
 
     /// Reads the next row into `row` and returns whether there was one.
@@ -189,38 +254,49 @@ extend Connection {
 
     fn read_column_names(statement: Statement) {
         @unsafe
-        let names = this.column_names
+        let known = statement.column_names
+        if isset(known) {
+            this.column_names.append_many(known)
+            return
+        }
+        let names = Array[String].new(statement.column_count)
         let i: uint = 0
         while i < statement.column_count {
             let name = sqlite3_column_name(statement.stmt, i.to(i32))
             names.append(isset(name) ? name.to(String) : "")
             i++
         }
+        statement.column_names = names
+        this.column_names.append_many(names)
     }
 
     // Prepares a statement, or returns the one that was prepared for this SQL before
-    fn prepare(sql: String) Statement !Error {
-        @unsafe
+    fn prepare_cached(sql: String) Statement !Error {
         let cached = this.statements.get(sql) ! {
-            let stmt: ?STMT = null
-            let code = sqlite3_prepare_v2(this.db, sql.data, sql.length.to(i32), @ref(stmt), null)
-            if code != SQLITE_OK || !isset(stmt) {
-                if code == SQLITE_OK : throw .syntax { message: "The statement is empty", sql: sql }
-                this.fail(code, sql)
-            }
-            this.statements_prepared++
-            let statement = Statement {
-                stmt: stmt
-                sql: sql
-                con: this
-                column_count: sqlite3_column_count(stmt).to(uint)
-            }
+            let statement = this.prepare_statement(sql) !>
             this.cache(sql, statement)
             return statement
         }
         cached.reset()
         this.touch(sql)
         return cached
+    }
+
+    fn prepare_statement(sql: String) Statement !Error {
+        @unsafe
+        let stmt: ?STMT = null
+        let code = sqlite3_prepare_v2(this.db, sql.data, sql.length.to(i32), @ref(stmt), null)
+        if code != SQLITE_OK || !isset(stmt) {
+            if code == SQLITE_OK : throw .syntax { message: "The statement is empty", sql: sql }
+            this.fail(code, sql)
+        }
+        this.statements_prepared++
+        return Statement {
+            stmt: stmt
+            sql: sql
+            con: this
+            column_count: sqlite3_column_count(stmt).to(uint)
+        }
     }
 
     // Keeps the cache at its size, dropping the statement that was used longest ago

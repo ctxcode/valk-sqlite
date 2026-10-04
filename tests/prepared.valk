@@ -1,0 +1,123 @@
+use sqlite
+
+test "Prepared statements" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, data BLOB)") ! { assert(false) return }
+    let before = db.statements_prepared
+
+    let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, @age)") ! { println(E.message) assert(false) return }
+    assert(insert.sql.starts_with("INSERT"))
+    let i: uint = 0
+    while i++ < 20 {
+        let changed = insert.run(.{ "name" => "user " + i, "age" => i }) ! { println(E.message) assert(false) return }
+        assert(changed == 1)
+        assert(db.last_insert_id == i.to(int))
+    }
+    // NULL values
+    insert.run(.{ "name" => null, "age" => 99 }) ! { assert(false) return }
+    // Parsed once, however often it ran
+    assert(db.statements_prepared == before + 1)
+
+    // A name used twice takes the same value
+    let find = db.prepare("SELECT id, name FROM users WHERE age >= :min AND age < :min + 3 ORDER BY id") ! { assert(false) return }
+    let rows = find.select(.{ "min" => 5 }) ! { assert(false) return }
+    assert(rows.length == 3)
+    assert(((rows.get(0) !? .{})["name"] ?? sqlite.Value.null()).to_string() == "user 5")
+    assert(db.column_names.length == 2)
+
+    // Rows one at a time through the connection, then again with other values
+    find.query(.{ "min" => 18 }) ! { assert(false) return }
+    let row: Map[sqlite.Value] = .{}
+    let seen: uint = 0
+    while db.fetch_row(row) ! { assert(false) return } : seen++
+    assert(seen == 3)
+    assert(db.affected_rows == 3)
+
+    // Stopping halfway and running again starts over
+    find.query(.{ "min" => 1 }) ! { assert(false) return }
+    assert(db.fetch_row(row) ! { assert(false) return })
+    let again = find.select(.{ "min" => 1 }) ! { assert(false) return }
+    assert(again.length == 3)
+
+    let count = db.prepare("SELECT count(*) FROM users WHERE age > :age") ! { assert(false) return }
+    assert((count.value(.{ "age" => 10 }) ! { assert(false) return }).to_int() == 11)
+    assert((count.value(.{ "age" => 1000 }) ! { assert(false) return }).to_int() == 0)
+
+    // Blobs keep every byte
+    let blob = db.prepare("UPDATE users SET data = :data WHERE id = :id") ! { assert(false) return }
+    blob.run(.{ "data" => sqlite.Value.of_blob("a\0b"), "id" => 1 }) ! { assert(false) return }
+    let data = (db.value("SELECT data FROM users WHERE id = 1") ! { assert(false) return })
+    assert(data.is_blob())
+    assert(data.to_string().length == 3)
+
+    // Other queries may run in between
+    db.run("DELETE FROM users WHERE id = :id", .{ "id" => 20 }) ! { assert(false) return }
+    assert((count.value(.{ "age" => 10 }) ! { assert(false) return }).to_int() == 10)
+
+    // A missing value throws
+    let missing = false
+    insert.run(.{ "name" => "x" }) ! {
+        missing = error_is(E.code, syntax)
+    }
+    assert(missing)
+
+    // Closed statements throw
+    insert.close()
+    let closed = false
+    insert.run(.{ "name" => "x", "age" => 1 }) ! {
+        closed = error_is(E.code, closed)
+    }
+    assert(closed)
+    insert.close()
+    find.close()
+    count.close()
+    blob.close()
+}
+
+test "Prepared statement errors" {
+    let db = memory() ! { assert(false) return }
+    defer db.close()
+    db.exec("CREATE TABLE t (n INTEGER UNIQUE)") ! { assert(false) return }
+
+    // `?` is refused, so values only go in by name
+    let positional = false
+    db.prepare("SELECT * FROM t WHERE n = ?") ! {
+        positional = error_is(E.code, syntax)
+    }
+    assert(positional)
+
+    let syntax = false
+    db.prepare("SELEC 1") ! {
+        syntax = error_is(E.code, syntax)
+    }
+    assert(syntax)
+
+    let insert = db.prepare("INSERT INTO t VALUES (:n)") ! { assert(false) return }
+    insert.run(.{ "n" => 1 }) ! { assert(false) return }
+    let clash = false
+    insert.run(.{ "n" => 1 }) ! {
+        clash = error_is(E.code, constraint)
+    }
+    assert(clash)
+    // The statement still works after an error
+    insert.run(.{ "n" => 2 }) ! { assert(false) return }
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 2)
+
+    // Closing a statement whose rows are being read stops the read
+    let all = db.prepare("SELECT n FROM t") ! { assert(false) return }
+    all.query() ! { assert(false) return }
+    all.close()
+    let row: Map[sqlite.Value] = .{}
+    assert(!(db.fetch_row(row) ! { assert(false) return }))
+
+    // Closing the connection closes its statements
+    let other = memory() ! { assert(false) return }
+    let one = other.prepare("SELECT 1") ! { assert(false) return }
+    other.close()
+    let closed = false
+    one.value() ! {
+        closed = error_is(E.code, closed)
+    }
+    assert(closed)
+}

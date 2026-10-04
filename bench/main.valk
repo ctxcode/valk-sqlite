@@ -12,10 +12,12 @@ fn main() {
         println("-- round " + round)
         bench_insert_direct()
         bench_insert_sql()
+        bench_insert_prepared()
         bench_select_rows_direct()
         bench_select_rows_sql()
         bench_select_one_direct()
         bench_select_one_sql()
+        bench_select_one_prepared()
     }
 }
 
@@ -54,6 +56,21 @@ fn bench_insert_sql() {
     db.commit() !!
     report("insert, through sql", start)
     db.close()
+}
+
+fn bench_insert_prepared() {
+    let con = fresh_direct()
+    let start = time.mono_us()
+    con.begin() !!
+    let insert = con.prepare("INSERT INTO t (name, n) VALUES (:name, :n)") !!
+    let i: uint = 0
+    while i++ < ROWS {
+        insert.run(.{ "name" => "row", "n" => i }) !!
+    }
+    insert.close()
+    con.commit() !!
+    report("insert, prepared", start)
+    con.close()
 }
 
 fn filled_direct() sqlite.Connection {
@@ -120,4 +137,19 @@ fn bench_select_one_sql() {
     report("select 1 row x " + ROWS + ", through sql", start)
     if total == 0 : println("no rows?")
     db.close()
+}
+
+fn bench_select_one_prepared() {
+    let con = filled_direct()
+    let start = time.mono_us()
+    let total: int = 0
+    let find = con.prepare("SELECT n FROM t WHERE id = :id") !!
+    let i: uint = 0
+    while i++ < ROWS {
+        total += (find.value(.{ "id" => i }) !!).to_int()
+    }
+    find.close()
+    report("select 1 row x " + ROWS + ", prepared", start)
+    if total == 0 : println("no rows?")
+    con.close()
 }

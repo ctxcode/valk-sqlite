@@ -114,6 +114,8 @@ Namespaces: [main](#main)
     + fn interrupt() void
     // Returns whether the database can only be read.
     + fn is_read_only() bool
+    // Prepares a statement to run many times, with other values each time.
+    + fn prepare(sql: String) Statement !Error
     // Runs one statement. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value`.
     + fn query(sql: String, binds: ?Map[?Value] (null)) void !Error
     // Forgets a savepoint, keeping everything that was done since.
@@ -152,6 +154,25 @@ Namespaces: [main](#main)
     + read_only: bool
     // Whether the path may be a `file:` URI with settings of its own.
     + uri: bool
+}
+```
+
+```js
+// A statement prepared once and run as often as needed, made by `Connection.prepare`.
++ class Statement {
+    // The SQL the statement was prepared from.
+    ~+ sql: String
+
+    // Releases the statement. Running it afterwards throws `closed`.
+    + fn close() void
+    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
+    + fn query(values: ?Map[?Value] (null)) void !Error
+    // Runs the statement and returns how many rows it changed.
+    + fn run(values: ?Map[?Value] (null)) uint !Error
+    // Runs the statement and returns every row it answered with.
+    + fn select(values: ?Map[?Value] (null)) Array[Map[Value]] !Error
+    // Runs the statement and returns the first column of its first row, NULL when there is none.
+    + fn value(values: ?Map[?Value] (null)) Value !Error
 }
 ```
 

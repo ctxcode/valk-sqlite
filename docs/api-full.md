@@ -213,6 +213,8 @@ Takes one row into the result.
     + fn interrupt() void
     // Returns whether the database can only be read.
     + fn is_read_only() bool
+    // Prepares a statement to run many times, with other values each time.
+    + fn prepare(sql: String) Statement !Error
     // Runs one statement. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value`.
     + fn query(sql: String, binds: ?Map[?Value] (null)) void !Error
     // Forgets a savepoint, keeping everything that was done since.
@@ -453,6 +455,19 @@ blocks the thread that runs it.
 
 Returns whether the database can only be read.
 
+#### prepare
+
+Prepares a statement to run many times, with other values each time.
+
+The SQL is parsed once, here; running the statement only binds its values. Values go in
+by name, `:name`, `@name` or `$name`; a `?` placeholder throws `syntax`.
+
+```valk
+let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+defer find.close()
+let users = find.select(.{ "id" => 1 }) ! panic("%{E.message}")
+```
+
 #### query
 
 Runs one statement. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or
@@ -558,6 +573,69 @@ Opens the database for reading only. Writing then throws `readonly`.
 #### uri
 
 Whether the path may be a `file:` URI with settings of its own.
+
+```js
+// A statement prepared once and run as often as needed, made by `Connection.prepare`.
++ class Statement {
+    // The SQL the statement was prepared from.
+    ~+ sql: String
+
+    // Releases the statement. Running it afterwards throws `closed`.
+    + fn close() void
+    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
+    + fn query(values: ?Map[?Value] (null)) void !Error
+    // Runs the statement and returns how many rows it changed.
+    + fn run(values: ?Map[?Value] (null)) uint !Error
+    // Runs the statement and returns every row it answered with.
+    + fn select(values: ?Map[?Value] (null)) Array[Map[Value]] !Error
+    // Runs the statement and returns the first column of its first row, NULL when there is none.
+    + fn value(values: ?Map[?Value] (null)) Value !Error
+}
+```
+
+### Statement
+
+A statement prepared once and run as often as needed, made by `Connection.prepare`.
+
+Its values go in by name, as with `Connection.query`, and its rows are read with the fetch
+methods of the connection. `close` releases it; a statement that is dropped without that is
+released when it is collected.
+
+```valk
+let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+defer insert.close()
+each people as person {
+    insert.run(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+}
+```
+
+#### sql
+
+The SQL the statement was prepared from.
+
+#### close
+
+Releases the statement. Running it afterwards throws `closed`.
+
+#### query
+
+Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are
+read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
+
+Every placeholder needs a value; a name without one throws `syntax`.
+
+#### run
+
+Runs the statement and returns how many rows it changed.
+
+#### select
+
+Runs the statement and returns every row it answered with.
+
+#### value
+
+Runs the statement and returns the first column of its first row, NULL when there is
+none.
 
 ```js
 // A value read from a row, or bound to a query.

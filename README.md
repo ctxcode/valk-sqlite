@@ -259,6 +259,33 @@ db.run("INSERT INTO users (email) VALUES (:email)", .{ "email" => email }) ! {
 }
 ```
 
+## Prepared statements
+
+A statement that runs many times can be prepared once and then run with other values each time,
+which skips the parsing and the lookup of the SQL:
+
+```rust
+let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+defer insert.close()
+each people as person {
+    insert.run(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+}
+
+let find = db.prepare("SELECT * FROM users WHERE age > :age") ! panic("%{E.message}")
+let adults = find.select(.{ "age" => 18 }) ! panic("%{E.message}")
+```
+
+A statement has `run`, `select`, `value` and `query`, like the connection; after `query` the rows
+are read with `db.fetch_row` as usual. Values go in by name and every placeholder needs one; `?`
+cannot be used. `close` releases the statement, and closing the connection releases them all.
+
+On an in-memory database (`bench/`), 50,000 runs of each:
+
+| | `db.run` / `db.value` | prepared |
+| --- | --- | --- |
+| insert one row | 23 ms | 13 ms |
+| select one row by id | 22 ms | 15 ms |
+
 ## Statement cache
 
 A query is prepared once and kept, so running it again with other values skips the parsing.
