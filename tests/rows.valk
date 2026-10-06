@@ -1,0 +1,157 @@
+use sqlite
+
+fn people() sqlite.Connection !sqlite.Error {
+    let db = memory() !>
+    db.exec("CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT, score REAL, nick TEXT, data BLOB, ok INTEGER)") !>
+    db.run("INSERT INTO p (name, score, nick, data, ok) VALUES ('Ada', 1.5, 'a', x'610062', 1)") !>
+    db.run("INSERT INTO p (name, score, nick, data, ok) VALUES ('Bob', NULL, NULL, NULL, 0)") !>
+    db.run("INSERT INTO p (name, score, nick, data, ok) VALUES ('Cy', 3, 'c', NULL, 1)") !>
+    return db
+}
+
+test "Rows by index" {
+    let db = people() ! { assert(false) return }
+    defer db.close()
+
+    db.query("SELECT id, name, score, nick, data, ok FROM p ORDER BY id") ! { assert(false) return }
+    assert(db.col_count() == 6)
+    assert(db.col_name(1) == "name")
+    assert((db.col_index("nick") ! { assert(false) return }) == 3)
+
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_int(0) == 1)
+    assert(db.col_string(1) == "Ada")
+    assert(db.col_view(1).equals("Ada"))
+    assert(db.col_float(2) == 1.5)
+    assert(db.col_string(2) == "1.5")
+    assert(db.col_type(2) == sqlite.TYPE.float)
+    assert((db.col_string_or_null(3) ?? "-") == "a")
+    // Blobs keep a zero byte
+    let blob = db.col_view(4)
+    assert(blob.length == 3 && blob[1] == 0)
+    assert(db.col_type(4) == sqlite.TYPE.blob)
+    assert(db.col_bool(5))
+    // A number read as bytes keeps its type
+    assert(db.col_view(0).equals("1"))
+    assert(db.col_type(0) == sqlite.TYPE.int)
+    assert(db.col_value(1).to_string() == "Ada")
+    // Views of one row stay valid together
+    let a = db.col_view(1)
+    let b = db.col_view(3)
+    assert(a.equals("Ada") && b.equals("a"))
+
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(1) == "Bob")
+    assert(db.col_is_null(2))
+    assert(!isset(db.col_float_or_null(2)))
+    assert(!isset(db.col_string_or_null(3)))
+    assert(!isset(db.col_int_or_null(4)))
+    assert(db.col_string(3) == "")
+    assert(db.col_view(4).length == 0)
+    assert(!db.col_bool(5))
+    // A column past the end reads as NULL
+    assert(db.col_is_null(9) && db.col_int(9) == 0)
+
+    assert(db.next_row() ! { assert(false) return })
+    assert((db.col_float_or_null(2) ?? 0) == 3)
+    assert((db.col_int_or_null(0) ?? 0) == 3)
+
+    assert(!(db.next_row() ! { assert(false) return }))
+    assert(!(db.next_row() ! { assert(false) return }))
+    assert(db.affected_rows == 3)
+    assert(db.col_string(1) == "")
+}
+
+test "Rows by index mixed with fetch" {
+    let db = people() ! { assert(false) return }
+    defer db.close()
+
+    // fetch_row after next_row moves on to the next row
+    db.query("SELECT name FROM p ORDER BY id") ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(0) == "Ada")
+    let row: Map[sqlite.Value] = .{}
+    assert(db.fetch_row(row) ! { assert(false) return })
+    assert((row["name"] ?? sqlite.Value.null()).to_string() == "Bob")
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(0) == "Cy")
+    assert(!(db.fetch_row(row) ! { assert(false) return }))
+
+    // A new query drops the row that was open
+    db.query("SELECT name FROM p ORDER BY id DESC") ! { assert(false) return }
+    assert(db.col_string(0) == "")
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(0) == "Cy")
+    let n = (db.value("SELECT count(*) FROM p") ! { assert(false) return }).to_int()
+    assert(n == 3)
+    assert(!(db.next_row() ! { assert(false) return }))
+
+    // An empty result
+    db.query("SELECT name FROM p WHERE id > 100") ! { assert(false) return }
+    assert(!(db.next_row() ! { assert(false) return }))
+}
+
+test "Positional binds" {
+    let db = people() ! { assert(false) return }
+    defer db.close()
+
+    let find = db.prepare("SELECT id, name FROM p WHERE id >= ? AND name <> ? ORDER BY id") ! { assert(false) return }
+    find.bind(1, 2)
+    find.bind(2, "Cy")
+    find.query() ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(1) == "Bob")
+    assert(!(db.next_row() ! { assert(false) return }))
+
+    // Values stay bound between runs; rebinding one changes only that one
+    find.bind_int(1, 1)
+    let rows = find.select() ! { assert(false) return }
+    assert(rows.length == 2)
+    // Binding while rows are being read stops the read
+    find.query() ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    find.bind_text(2, "Ada")
+    assert(!(db.next_row() ! { assert(false) return }))
+    assert((find.select() ! { assert(false) return }).length == 2)
+
+    // Every kind
+    let insert = db.prepare("INSERT INTO p (name, score, nick, data, ok) VALUES (?1, ?2, ?3, ?4, ?5)") ! { assert(false) return }
+    let nick: ?String = null
+    insert.bind(1, "Dee")
+    insert.bind(2, 2.5)
+    insert.bind(3, nick)
+    insert.bind_blob(4, "x\0y")
+    insert.bind(5, true)
+    assert((insert.run() ! { assert(false) return }) == 1)
+    insert.bind_float(2, 4.0)
+    insert.bind_null(3)
+    insert.bind_value(1, sqlite.Value.of("Eve"))
+    insert.run() ! { assert(false) return }
+
+    db.query("SELECT name, score, nick, data, ok FROM p WHERE id > 3 ORDER BY id") ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(0) == "Dee" && db.col_float(1) == 2.5 && db.col_is_null(2))
+    assert(db.col_type(3) == sqlite.TYPE.blob && db.col_view(3).length == 3)
+    assert(db.col_int(4) == 1)
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_string(0) == "Eve" && db.col_float(1) == 4)
+
+    // Named placeholders can be bound by position too, and a map still works
+    let named = db.prepare("SELECT count(*) FROM p WHERE id > :min AND id < :max") ! { assert(false) return }
+    named.bind(1, 1)
+    named.bind(2, 5)
+    assert((named.value() ! { assert(false) return }).to_int() == 3)
+    assert((named.value(.{ "min" => 0, "max" => 3 }) ! { assert(false) return }).to_int() == 2)
+
+    // An index the statement does not have throws on the next run, once
+    find.bind(7, 1)
+    let range = false
+    find.query() ! {
+        range = error_is(E.code, syntax)
+    }
+    assert(range)
+    find.query() ! { assert(false) return }
+    find.close()
+    insert.close()
+    named.close()
+}

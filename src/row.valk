@@ -1,0 +1,161 @@
+use valk.mem
+
+// Row access without a map: `next_row` steps the statement and the col_* methods read the
+// columns of the current row straight from SQLite.
+
+extend Connection {
+    // Whether `next_row` handed out the row the statement is on
+    row_open: bool (false)
+    // Holds the bytes behind the views of `col_view`, reused for every row
+    col_buffer: ByteBuffer (ByteBuffer.new(256))
+
+    /// Moves to the next row without building a map, and returns false when there is none
+    /// left. Its columns are read with the `col_*` methods by index, from 0.
+    ///
+    /// ```valk
+    /// db.query("SELECT id, name, email FROM users") ! panic("%{E.message}")
+    /// while db.next_row() ! panic("%{E.message}") {
+    ///     let id = db.col_int(0)
+    ///     let name = db.col_string(1)
+    ///     let email = db.col_string_or_null(2)
+    /// }
+    /// ```
+    + fn next_row() bool !Error {
+        if this.state != STATE_ROW : return false
+        let statement = this.current
+        if !isset(statement) : return false
+        if this.row_open {
+            this.row_open = false
+            this.advance(statement) !>
+            if this.state != STATE_ROW : return false
+        }
+        this.row_open = true
+        this.col_buffer.clear()
+        this.affected_rows++
+        return true
+    }
+
+    /// Returns the number of columns of the current result.
+    + fn col_count() uint {
+        return this.column_names.length
+    }
+    /// Returns the name of column `index`, or "" when there is no such column.
+    + fn col_name(index: uint) String {
+        return this.column_names.get(index) !? ""
+    }
+    /// Returns the index of the column named `name`.
+    + fn col_index(name: String) uint !LookupError {
+        return this.column_names.index_of(name) !>
+    }
+    /// Returns the kind of value in column `index` of the current row; `null` when there is
+    /// no row or no such column.
+    + fn col_type(index: uint) TYPE {
+        @unsafe
+        let stmt = this.row_stmt(index) ?! return TYPE.null
+        let type = sqlite3_column_type(stmt, index.to(i32))
+        if type == SQLITE_INTEGER : return TYPE.int
+        if type == SQLITE_FLOAT : return TYPE.float
+        if type == SQLITE_BLOB : return TYPE.blob
+        if type == SQLITE_NULL : return TYPE.null
+        return TYPE.string
+    }
+    /// Returns whether column `index` of the current row is NULL (or missing).
+    + fn col_is_null(index: uint) bool {
+        return this.col_type(index) == TYPE.null
+    }
+    /// Returns the bytes of column `index`, text or blob, without allocating; numbers come as
+    /// text and NULL as empty. The view is valid until the next row is read.
+    + fn col_view(index: uint) &[u8] {
+        @unsafe
+        let buf = this.col_buffer
+        let start = buf.length
+        let stmt = this.row_stmt(index) ?! return buf.view(start, 0)
+        let i = index.to(i32)
+        let type = sqlite3_column_type(stmt, i)
+        // Numbers are formatted here: reading them as text would change their type in SQLite
+        if type == SQLITE_INTEGER : buf.write_int_ascii(sqlite3_column_int64(stmt, i).to(int))
+        else if type == SQLITE_FLOAT : buf.write(sqlite3_column_double(stmt, i).to(float).to_shortest_string())
+        else if type != SQLITE_NULL {
+            let data = sqlite3_column_blob(stmt, i)
+            let length = sqlite3_column_bytes(stmt, i).to(uint)
+            if isset(data) && length > 0 {
+                buf.reserve(length)
+                mem.copy_bytes(data, buf.data.@offset(start), length)
+                buf.skip(length)
+            }
+        }
+        return buf.view(start, buf.length - start)
+    }
+    /// Returns column `index` as a new string, "" for NULL; numbers are formatted.
+    + fn col_string(index: uint) String {
+        @unsafe
+        let stmt = this.row_stmt(index) ?! return ""
+        let i = index.to(i32)
+        let type = sqlite3_column_type(stmt, i)
+        if type == SQLITE_NULL : return ""
+        if type == SQLITE_INTEGER : return sqlite3_column_int64(stmt, i).to(int).to(String)
+        if type == SQLITE_FLOAT : return sqlite3_column_double(stmt, i).to(float).to_shortest_string()
+        let data = sqlite3_column_blob(stmt, i)
+        let length = sqlite3_column_bytes(stmt, i).to(uint)
+        if !isset(data) || length == 0 : return ""
+        return String.copy_from_ptr(data, length)
+    }
+    /// Like `col_string`, but null for NULL.
+    + fn col_string_or_null(index: uint) ?String {
+        if this.col_is_null(index) : return null
+        return this.col_string(index)
+    }
+    /// Returns column `index` as an integer, converted the way SQLite converts: text is
+    /// parsed, floats are truncated, NULL is 0.
+    + fn col_int(index: uint) int {
+        @unsafe
+        let stmt = this.row_stmt(index) ?! return 0
+        return sqlite3_column_int64(stmt, index.to(i32)).to(int)
+    }
+    /// Like `col_int`, but null for NULL.
+    + fn col_int_or_null(index: uint) ?int {
+        if this.col_is_null(index) : return null
+        return this.col_int(index)
+    }
+    /// Returns column `index` as a float; text is parsed, NULL is 0.
+    + fn col_float(index: uint) float {
+        @unsafe
+        let stmt = this.row_stmt(index) ?! return 0
+        return sqlite3_column_double(stmt, index.to(i32)).to(float)
+    }
+    /// Like `col_float`, but null for NULL.
+    + fn col_float_or_null(index: uint) ?float {
+        if this.col_is_null(index) : return null
+        return this.col_float(index)
+    }
+    /// Returns column `index` as a bool, like `Value.to_bool`.
+    + fn col_bool(index: uint) bool {
+        let type = this.col_type(index)
+        if type == TYPE.int || type == TYPE.float : return this.col_float(index) != 0
+        if type != TYPE.string : return false
+        let v = this.col_view(index)
+        return v.equals("1") || v.equals("true") || v.equals("t") || v.equals("yes") || v.equals("on")
+    }
+    /// Returns column `index` as a `Value`, as `fetch_row` would put it in the map.
+    + fn col_value(index: uint) Value {
+        @unsafe
+        let stmt = this.row_stmt(index) ?! return Value.null()
+        return read_column(stmt, index.to(i32))
+    }
+
+    // The statement whose row `next_row` handed out, when it has column `index`
+    fn row_stmt(index: uint) ?STMT {
+        if !this.row_open : return null
+        let statement = this.current ?! return null
+        if index >= statement.column_count : return null
+        return statement.stmt
+    }
+
+    // Steps past the row `next_row` handed out, so that the fetch methods start on a new one
+    fn settle() !Error {
+        if !this.row_open : return
+        this.row_open = false
+        let statement = this.current ?! return
+        this.advance(statement) !>
+    }
+}

@@ -72,7 +72,22 @@ while (db.fetch_row(row) ! panic("%{E.message}")) {
 }
 ```
 
-The same map is filled again for every row.
+The same map is filled again for every row. Without a map at all, `next_row` moves to the next
+row and the `col_*` methods read its columns by index, from 0:
+
+```rust
+db.query("SELECT id, name, email FROM users ORDER BY id") ! panic("%{E.message}")
+while db.next_row() ! panic("%{E.message}") {
+    let id = db.col_int(0)
+    let name = db.col_string(1)                 // a new string
+    let email = db.col_string_or_null(2)        // null for NULL
+    let bytes = db.col_view(1)                  // no allocation; valid until the next row
+}
+```
+
+There are `col_int`, `col_float`, `col_bool`, `col_string`, their `_or_null` versions, `col_view`
+for text and blobs, `col_value`, `col_type` and `col_is_null`; `col_count`, `col_name` and
+`col_index` describe the columns.
 
 ## Values
 
@@ -276,8 +291,18 @@ let adults = find.select(.{ "age" => 18 }) ! panic("%{E.message}")
 ```
 
 A statement has `run`, `select`, `value` and `query`, like the connection; after `query` the rows
-are read with `db.fetch_row` as usual. Values go in by name and every placeholder needs one; `?`
-cannot be used. `close` releases the statement, and closing the connection releases them all.
+are read with `db.fetch_row` or `db.next_row`. Values from a map go in by name and every
+placeholder needs one. `close` releases the statement, and closing the connection releases them all.
+
+Values can also be bound by position, counted from 1, which takes no map and fills `?` too. A value
+stays bound across runs until it is bound again:
+
+```rust
+let find = db.prepare("SELECT id, name, email FROM users WHERE age > ? AND city = ?") ! panic("%{E.message}")
+find.bind(1, 18)              // or bind_int, bind_float, bind_text, bind_blob, bind_null
+find.bind(2, city)
+find.query() ! panic("%{E.message}")
+```
 
 On an in-memory database (`bench/`), 50,000 runs of each:
 
@@ -285,6 +310,17 @@ On an in-memory database (`bench/`), 50,000 runs of each:
 | --- | --- | --- |
 | insert one row | 23 ms | 13 ms |
 | select one row by id | 22 ms | 15 ms |
+
+Reading rows by index instead of into maps, on the same in-memory setup (`bench/` with the
+argument `rows`):
+
+| | map | `next_row` + `col_string` | `next_row` + `col_view` |
+| --- | --- | --- | --- |
+| 100,000 single-row selects (3 columns, bound by position) | 1,620 ns/row, 1,067 B | 690 ns/row, 31 B | 620 ns/row, 0 B |
+| 50-row select of 10 columns, every column read | 1,630-2,440 ns/row, 696-1,153 B | 370 ns/row, 132 B | 310 ns/row, 0 B |
+
+Bytes are what the program allocated per row. The map rows of the 50-row select are `select`
+(new maps) and `fetch_row` (one map reused), which read only 2 of the 10 columns.
 
 ## Statement cache
 

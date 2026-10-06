@@ -1,0 +1,153 @@
+use sqlite
+use valk.gc
+use valk.time
+
+// Map rows against the col_* cursor and positional binds
+value SINGLES (100000)
+value WIDE_ROWS (50)
+value WIDE_RUNS (2000)
+
+fn bench_rows() {
+    let con = sqlite.open_memory() !!
+    con.exec("CREATE TABLE w (id INTEGER PRIMARY KEY, a TEXT, b TEXT, c TEXT, d INTEGER, e INTEGER, f REAL, g REAL, h TEXT, i INTEGER)") !!
+    con.begin() !!
+    let n: uint = 0
+    while n++ < SINGLES {
+        con.run("INSERT INTO w (a, b, c, d, e, f, g, h, i) VALUES (:a, :b, :c, :d, :e, :f, :g, :h, :i)", .{
+            "a" => "name " + n, "b" => "user" + n + "@example.com", "c" => "some longer text for row " + n
+            "d" => n, "e" => n * 7, "f" => n.to(float) / 3, "g" => 1.5, "h" => n % 3 == 0 ? null : "nick", "i" => n % 2
+        }) !!
+    }
+    con.commit() !!
+
+    single_map(con)
+    single_cursor(con, false)
+    single_cursor(con, true)
+    wide_map(con)
+    wide_fetch_row(con)
+    wide_cursor(con, false)
+    wide_cursor(con, true)
+    con.close()
+}
+
+// Bytes allocated by the GC on this thread, counted over stretches without a collection
+global alloc_bytes: uint (0)
+global alloc_last: uint (0)
+fn alloc_reset() {
+    alloc_bytes = 0
+    alloc_last = gc.gc.mem_new
+}
+fn alloc_track() {
+    let now = gc.gc.mem_new
+    if now >= alloc_last : alloc_bytes += now - alloc_last
+    alloc_last = now
+}
+
+fn report_rows(label: String, start: uint, rows: uint) {
+    let ns = (time.mono_us() - start) * 1000
+    println(label.pad_right(' ', 40) + (ns / rows) + " ns/row, " + (alloc_bytes / rows) + " B/row allocated")
+}
+
+fn single_map(con: sqlite.Connection) {
+    let find = con.prepare("SELECT id, a, d FROM w WHERE id = :id") !!
+    let total: int = 0
+    alloc_reset()
+    let start = time.mono_us()
+    let i: uint = 0
+    while i++ < SINGLES {
+        let rows = find.select(.{ "id" => i }) !!
+        let row = rows.get(0) !!
+        total += (row["d"] ?? sqlite.Value.null()).to_int() + (row["a"] ?? sqlite.Value.null()).to_string().length.to(int)
+        alloc_track()
+    }
+    report_rows("1 row x " + SINGLES + ", map", start, SINGLES)
+    find.close()
+    if total == 0 : println("no rows?")
+}
+
+fn single_cursor(con: sqlite.Connection, view: bool) {
+    let find = con.prepare("SELECT id, a, d FROM w WHERE id = ?") !!
+    let total: int = 0
+    alloc_reset()
+    let start = time.mono_us()
+    let i: uint = 0
+    while i++ < SINGLES {
+        find.bind_int(1, i.to(int))
+        find.query() !!
+        if !(con.next_row() !!) : continue
+        let len = view ? con.col_view(1).length : con.col_string(1).length
+        total += con.col_int(2) + len.to(int)
+        alloc_track()
+    }
+    report_rows("1 row x " + SINGLES + ", col_* " + (view ? "view" : "string"), start, SINGLES)
+    find.close()
+    if total == 0 : println("no rows?")
+}
+
+value WIDE_SQL ("SELECT id, a, b, c, d, e, f, g, h, i FROM w WHERE id > :from ORDER BY id LIMIT 50")
+
+fn wide_map(con: sqlite.Connection) {
+    let find = con.prepare(WIDE_SQL) !!
+    let total: int = 0
+    alloc_reset()
+    let start = time.mono_us()
+    let r: uint = 0
+    while r++ < WIDE_RUNS {
+        let rows = find.select(.{ "from" => r * 10 }) !!
+        each rows as row {
+            total += (row["d"] ?? sqlite.Value.null()).to_int()
+            total += (row["b"] ?? sqlite.Value.null()).to_string().length.to(int)
+        }
+        alloc_track()
+    }
+    report_rows("50 rows x 10 cols, select maps", start, WIDE_RUNS * WIDE_ROWS)
+    find.close()
+    if total == 0 : println("no rows?")
+}
+
+fn wide_fetch_row(con: sqlite.Connection) {
+    let find = con.prepare(WIDE_SQL) !!
+    let total: int = 0
+    let row: Map[sqlite.Value] = .{}
+    alloc_reset()
+    let start = time.mono_us()
+    let r: uint = 0
+    while r++ < WIDE_RUNS {
+        find.query(.{ "from" => r * 10 }) !!
+        while con.fetch_row(row) !! {
+            total += (row["d"] ?? sqlite.Value.null()).to_int()
+            total += (row["b"] ?? sqlite.Value.null()).to_string().length.to(int)
+        }
+        alloc_track()
+    }
+    report_rows("50 rows x 10 cols, fetch_row one map", start, WIDE_RUNS * WIDE_ROWS)
+    find.close()
+    if total == 0 : println("no rows?")
+}
+
+// Reads every column, as code that fills an object would
+fn wide_cursor(con: sqlite.Connection, view: bool) {
+    let find = con.prepare(WIDE_SQL.replace(":from", "?")) !!
+    let total: int = 0
+    alloc_reset()
+    let start = time.mono_us()
+    let r: uint = 0
+    while r++ < WIDE_RUNS {
+        find.bind_int(1, (r * 10).to(int))
+        find.query() !!
+        while con.next_row() !! {
+            total += con.col_int(0) + con.col_int(4) + con.col_int(5) + con.col_int(9)
+            total += (con.col_float(6) + con.col_float(7)).to(int)
+            if view {
+                total += (con.col_view(1).length + con.col_view(2).length + con.col_view(3).length + con.col_view(8).length).to(int)
+            } else {
+                total += (con.col_string(1).length + con.col_string(2).length + con.col_string(3).length).to(int)
+                total += ((con.col_string_or_null(8) ?? "").length).to(int)
+            }
+        }
+        alloc_track()
+    }
+    report_rows("50 rows x 10 cols, col_* " + (view ? "view" : "string"), start, WIDE_RUNS * WIDE_ROWS)
+    find.close()
+    if total == 0 : println("no rows?")
+}

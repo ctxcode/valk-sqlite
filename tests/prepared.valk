@@ -80,9 +80,10 @@ test "Prepared statement errors" {
     defer db.close()
     db.exec("CREATE TABLE t (n INTEGER UNIQUE)") ! { assert(false) return }
 
-    // `?` is refused, so values only go in by name
+    // A `?` is bound by position, so a map cannot fill it
     let positional = false
-    db.prepare("SELECT * FROM t WHERE n = ?") ! {
+    let by_position = db.prepare("SELECT * FROM t WHERE n = ?") ! { assert(false) return }
+    by_position.query(.{ "n" => 1 }) ! {
         positional = error_is(E.code, syntax)
     }
     assert(positional)

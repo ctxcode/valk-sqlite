@@ -88,6 +88,34 @@ Namespaces: [main](#main)
     + fn clear_binds() void
     // Closes the connection and releases every prepared statement. Further calls throw `closed`.
     + fn close() void
+    // Returns column `index` as a bool, like `Value.to_bool`.
+    + fn col_bool(index: uint) bool
+    // Returns the number of columns of the current result.
+    + fn col_count() uint
+    // Returns column `index` as a float; text is parsed, NULL is 0.
+    + fn col_float(index: uint) float
+    // Like `col_float`, but null for NULL.
+    + fn col_float_or_null(index: uint) ?float
+    // Returns the index of the column named `name`.
+    + fn col_index(name: String) uint !LookupError
+    // Returns column `index` as an integer, converted the way SQLite converts: text is parsed, floats are truncated, NULL is 0.
+    + fn col_int(index: uint) int
+    // Like `col_int`, but null for NULL.
+    + fn col_int_or_null(index: uint) ?int
+    // Returns whether column `index` of the current row is NULL (or missing).
+    + fn col_is_null(index: uint) bool
+    // Returns the name of column `index`, or "" when there is no such column.
+    + fn col_name(index: uint) String
+    // Returns column `index` as a new string, "" for NULL; numbers are formatted.
+    + fn col_string(index: uint) String
+    // Like `col_string`, but null for NULL.
+    + fn col_string_or_null(index: uint) ?String
+    // Returns the kind of value in column `index` of the current row; `null` when there is no row or no such column.
+    + fn col_type(index: uint) TYPE
+    // Returns column `index` as a `Value`, as `fetch_row` would put it in the map.
+    + fn col_value(index: uint) Value
+    // Returns the bytes of column `index`, text or blob, without allocating; numbers come as text and NULL as empty. The view is valid until the next row is read.
+    + fn col_view(index: uint) &[u8]
     // Commits the open transaction.
     + fn commit() void !Error
     // Registers an aggregate function, which SQL can use like `count` or `sum`.
@@ -114,6 +142,8 @@ Namespaces: [main](#main)
     + fn interrupt() void
     // Returns whether the database can only be read.
     + fn is_read_only() bool
+    // Moves to the next row without building a map, and returns false when there is none left. Its columns are read with the `col_*` methods by index, from 0.
+    + fn next_row() bool !Error
     // Prepares a statement to run many times, with other values each time.
     + fn prepare(sql: String) Statement !Error
     // Runs one statement. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value`.
@@ -163,9 +193,23 @@ Namespaces: [main](#main)
     // The SQL the statement was prepared from.
     ~+ sql: String
 
+    // Binds `value` to placeholder `index`, counted from 1 in the order the placeholders first appear, as in SQL's `?1`. Integers, floats, bools, text, `Value`, `json.Value` and their nullable versions are taken.
+    + fn bind(index: uint, value: $T) void
+    // Binds bytes as a blob to placeholder `index`, see `bind`.
+    + fn bind_blob(index: uint, data: String) void
+    // Binds a float to placeholder `index`, see `bind`.
+    + fn bind_float(index: uint, value: float) void
+    // Binds an integer to placeholder `index`, see `bind`.
+    + fn bind_int(index: uint, value: int) void
+    // Binds NULL to placeholder `index`, see `bind`.
+    + fn bind_null(index: uint) void
+    // Binds text to placeholder `index`, see `bind`.
+    + fn bind_text(index: uint, text: String) void
+    // Binds a `Value` to placeholder `index`, see `bind`.
+    + fn bind_value(index: uint, value: Value) void
     // Releases the statement. Running it afterwards throws `closed`.
     + fn close() void
-    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
+    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `next_row`, `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
     + fn query(values: ?Map[?Value] (null)) void !Error
     // Runs the statement and returns how many rows it changed.
     + fn run(values: ?Map[?Value] (null)) uint !Error

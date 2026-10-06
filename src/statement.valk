@@ -4,8 +4,8 @@ value STATE_DONE (2)
 
 /// A statement prepared once and run as often as needed, made by `Connection.prepare`.
 ///
-/// Its values go in by name, as with `Connection.query`, and its rows are read with the fetch
-/// methods of the connection. `close` releases it; a statement that is dropped without that is
+/// Its values go in by name from a map, as with `Connection.query`, or by position with `bind`.
+/// Its rows are read with `next_row` or the fetch methods of the connection. `close` releases it; a statement that is dropped without that is
 /// released when it is collected.
 ///
 /// ```valk
@@ -27,6 +27,9 @@ value STATE_DONE (2)
     names: ?Array[String] (null)
     // Read on the first run
     column_names: ?Array[String] (null)
+    // The first bind that failed, thrown by the next run
+    bind_code: i32 (0)
+    bind_index: uint (0)
 
     // A prepared statement is a handle into SQLite, not a value: a copy would finalize the same
     // statement twice, so a clone is the same statement
@@ -35,9 +38,11 @@ value STATE_DONE (2)
     }
 
     /// Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are
-    /// read with `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
+    /// read with `next_row`, `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the
+    /// connection.
     ///
-    /// Every placeholder needs a value; a name without one throws `syntax`.
+    /// With `values`, every placeholder needs a value; a name without one throws `syntax`.
+    /// Without, the statement runs with what `bind` and the other bind methods bound.
     + fn query(values: ?Map[?Value] (null)) !Error {
         this.con.query_prepared(this, values) !>
     }
@@ -67,6 +72,77 @@ value STATE_DONE (2)
         return value
     }
 
+    /// Binds `value` to placeholder `index`, counted from 1 in the order the placeholders first
+    /// appear, as in SQL's `?1`. Integers, floats, bools, text, `Value`, `json.Value` and
+    /// their nullable versions are taken.
+    ///
+    /// A value stays bound until it is bound again, over any number of runs; a placeholder
+    /// that never got one is NULL. An index the statement does not have throws `syntax` on the
+    /// next run.
+    ///
+    /// ```valk
+    /// let find = db.prepare("SELECT id, name FROM users WHERE age > ? AND city = ?") ! panic("%{E.message}")
+    /// find.bind(1, 18)
+    /// find.bind(2, "Ghent")
+    /// find.query() ! panic("%{E.message}")
+    /// ```
+    + fn bind(index: uint, value: $T) {
+        #if T.$is_nullable
+        if !isset(value) {
+            this.bind_null(index)
+            return
+        }
+        #end
+        let v = value
+        #if T.$is_type_of(String)
+        this.bind_text(index, v)
+        #elif T.$is_bool
+        this.bind_int(index, v ? 1 : 0)
+        #elif T.$is_integer
+        this.bind_int(index, v.to(int))
+        #elif T.$is_float
+        this.bind_float(index, v.to(float))
+        #else
+        this.bind_value(index, convert(v))
+        #end
+    }
+    /// Binds an integer to placeholder `index`, see `bind`.
+    + fn bind_int(index: uint, value: int) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, sqlite3_bind_int64(this.stmt, i, value.to(i64)))
+    }
+    /// Binds a float to placeholder `index`, see `bind`.
+    + fn bind_float(index: uint, value: float) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, sqlite3_bind_double(this.stmt, i, value.to(f64)))
+    }
+    /// Binds text to placeholder `index`, see `bind`.
+    + fn bind_text(index: uint, text: String) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, sqlite3_bind_text64(this.stmt, i, text.data, text.length.to(u64), sqlite_transient(), 1))
+    }
+    /// Binds bytes as a blob to placeholder `index`, see `bind`.
+    + fn bind_blob(index: uint, data: String) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, sqlite3_bind_blob64(this.stmt, i, data.data, data.length.to(u64), sqlite_transient()))
+    }
+    /// Binds NULL to placeholder `index`, see `bind`.
+    + fn bind_null(index: uint) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, sqlite3_bind_null(this.stmt, i))
+    }
+    /// Binds a `Value` to placeholder `index`, see `bind`.
+    + fn bind_value(index: uint, value: Value) {
+        @unsafe
+        let i = this.bind_slot(index) ?! return
+        this.bound(index, bind_code(this.stmt, i, value))
+    }
+
     /// Releases the statement. Running it afterwards throws `closed`.
     + fn close() {
         let current = this.con.current
@@ -74,12 +150,27 @@ value STATE_DONE (2)
         this.finalize()
     }
 
-    // Puts the statement back in the state it was prepared in
+    // Puts the statement back in the state it was prepared in. A statement from `prepare`
+    // keeps its values, which `bind` promises
     fn reset() {
         @unsafe
         if this.finalized : return
         sqlite3_reset(this.stmt)
-        sqlite3_clear_bindings(this.stmt)
+        if !isset(this.names) : sqlite3_clear_bindings(this.stmt)
+    }
+
+    // Stops the statement when it is running, since SQLite binds only to an idle one
+    fn bind_slot(index: uint) ?i32 {
+        if this.finalized : return null
+        let current = this.con.current
+        if isset(current) && current == this : this.con.stop()
+        return index.to(i32)
+    }
+
+    fn bound(index: uint, code: i32) {
+        if code == SQLITE_OK || this.bind_code != SQLITE_OK : return
+        this.bind_code = code
+        this.bind_index = index
     }
 
     fn finalize() {

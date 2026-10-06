@@ -61,7 +61,8 @@ extend Connection {
     /// Prepares a statement to run many times, with other values each time.
     ///
     /// The SQL is parsed once, here; running the statement only binds its values. Values go in
-    /// by name, `:name`, `@name` or `$name`; a `?` placeholder throws `syntax`.
+    /// by name from a map, for `:name`, `@name` and `$name`, or by position with
+    /// `Statement.bind`, which also fills `?`.
     ///
     /// ```valk
     /// let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
@@ -78,9 +79,10 @@ extend Connection {
         let i: i32 = 1
         while i <= count {
             let name = sqlite3_bind_parameter_name(stmt, i++)
+            // A `?` has no name and is bound by position only
             if !isset(name) || name.to(String).starts_with("?") {
-                statement.finalize()
-                throw .syntax { message: "A prepared statement takes its values by name: use :name instead of ?", sql: sql }
+                names.append("")
+                continue
             }
             let text: String = name
             names.append(text.range(1, text.length - 1))
@@ -100,11 +102,18 @@ extend Connection {
         if this.debug : println("QUERY: " + statement.sql)
 
         sqlite3_reset(statement.stmt)
+        if statement.bind_code != SQLITE_OK {
+            let code = statement.bind_code
+            let message = "Cannot bind the value of placeholder " + statement.bind_index
+            statement.bind_code = SQLITE_OK
+            if code == SQLITE_RANGE : throw .syntax { message: message + ": the statement has " + sqlite3_bind_parameter_count(statement.stmt) + " placeholders", result_code: code.to(int), sql: statement.sql }
+            throw .error { message: message, result_code: code.to(int), sql: statement.sql }
+        }
         let names = statement.names
-        if isset(names) {
+        if isset(names) && isset(values) {
             each names as name, i {
-                let given = values ?! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement.sql }
-                let value = given.get(name) ! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement.sql }
+                if name.length == 0 : throw .syntax { message: "A `?` placeholder takes its value from `bind`, not from a map", sql: statement.sql }
+                let value = values.get(name) ! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement.sql }
                 let index = (i + 1).to(i32)
                 if !isset(value) {
                     sqlite3_bind_null(statement.stmt, index)
@@ -122,6 +131,7 @@ extend Connection {
     // Takes the first step of a bound statement
     fn start(statement: Statement) !Error {
         @unsafe
+        this.row_open = false
         this.current = statement
         let step = sqlite3_step(statement.stmt)
         if step == SQLITE_ROW {
@@ -156,6 +166,7 @@ extend Connection {
     /// ```
     + fn fetch_row(row: Map[Value]) bool !Error {
         @unsafe
+        this.settle() !>
         if this.state != STATE_ROW : return false
         let statement = this.current
         if !isset(statement) : return false
@@ -195,6 +206,7 @@ extend Connection {
     /// This is for the queries that answer with one value, such as `SELECT count(*) FROM users`.
     + fn fetch_value() Value !Error {
         @unsafe
+        this.settle() !>
         if this.state != STATE_ROW : return Value.null()
         let statement = this.current
         if !isset(statement) : return Value.null()
@@ -361,6 +373,12 @@ fn bind_index(stmt: STMT, name: String) i32 {
 
 fn bind_value(stmt: STMT, index: i32, value: Value) !Error {
     @unsafe
+    let code = bind_code(stmt, index, value)
+    if code != SQLITE_OK : throw .error { message: "Cannot bind the value at position " + index, result_code: code.to(int) }
+}
+
+fn bind_code(stmt: STMT, index: i32, value: Value) i32 {
+    @unsafe
     let type = value.type
     let code: i32 = SQLITE_OK
     if type == TYPE.null : code = sqlite3_bind_null(stmt, index)
@@ -373,7 +391,7 @@ fn bind_value(stmt: STMT, index: i32, value: Value) !Error {
         let text = value.string_value
         code = sqlite3_bind_text64(stmt, index, text.data, text.length.to(u64), sqlite_transient(), 1)
     }
-    if code != SQLITE_OK : throw .error { message: "Cannot bind the value at position " + index, result_code: code.to(int) }
+    return code
 }
 
 // Reads one column of the current row

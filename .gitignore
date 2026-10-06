@@ -4,3 +4,4 @@ tests/tmp
 example/tasks.db*
 vendor
 tests/vendor
+bench/bench

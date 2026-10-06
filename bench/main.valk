@@ -5,7 +5,12 @@ use valk.time
 // What going through valk-sql costs on top of the driver itself.
 value ROWS (50000)
 
-fn main() {
+fn main(args: Array[String]) {
+    if args.contains("rows") {
+        bench_rows()
+        bench_rows()
+        return
+    }
     println("rows: " + ROWS + ", best of three")
     let round: uint = 0
     while round++ < 3 {

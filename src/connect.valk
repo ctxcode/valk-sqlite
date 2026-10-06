@@ -238,6 +238,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
             this.current = null
         }
         this.state = STATE_IDLE
+        this.row_open = false
     }
 
     fn read_counters() {

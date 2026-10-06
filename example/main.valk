@@ -57,6 +57,15 @@ fn main() {
         println((done ? "[x] " : "[ ] ") + (row["title"] ?? sqlite.Value.null()))
     }
 
+    // A statement prepared once, bound by position, its rows read by column index without a map
+    let titles_like = db.prepare("SELECT id, title FROM tasks WHERE title LIKE ? ORDER BY id") ! panic("%{E.message}")
+    defer titles_like.close()
+    titles_like.bind(1, "write%")
+    titles_like.query() ! panic("%{E.message}")
+    while db.next_row() ! panic("%{E.message}") {
+        println("task " + db.col_int(0) + ": " + db.col_string(1))
+    }
+
     // A query that answers with one value
     let open_tasks = (db.value("SELECT count(*) FROM tasks WHERE done = 0") ! panic("%{E.message}")).to_int()
     println(open_tasks + " still to do")
