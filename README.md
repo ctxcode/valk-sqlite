@@ -89,6 +89,16 @@ There are `col_int`, `col_float`, `col_bool`, `col_string`, their `_or_null` ver
 for text and blobs, `col_value`, `col_type` and `col_is_null`; `col_count`, `col_name` and
 `col_index` describe the columns.
 
+A query that is read to the end lets go of its statement by itself. To stop early, such as
+after the first row, call `finish`; otherwise the statement keeps its read lock, which in WAL
+mode holds back checkpoints, until the next query on the connection starts:
+
+```rust
+db.query("SELECT id FROM users WHERE email = :email", .{ "email" => email }) ! panic("%{E.message}")
+let id = (db.next_row() ! panic("%{E.message}")) ? db.col_int(0) : 0
+db.finish()
+```
+
 ## Values
 
 A row is a `Map[sqlite.Value]`. SQLite stores what it is given rather than what a column
@@ -250,6 +260,43 @@ db.backup_to("backup.db") ! panic("%{E.message}")
 This is SQLite's online backup: it can run while other connections write. Copying the file
 with `fs.copy` cannot, and can give a damaged copy.
 
+## WAL checkpoints
+
+In WAL mode a commit goes to the `-wal` file, and a checkpoint copies it back into the
+database. SQLite does that inside the commit that takes the WAL past 1000 pages, so that one
+commit waits for it. A program that writes a lot can turn that off on its writers and
+checkpoint from a connection of its own on another thread:
+
+```rust
+// The writer: no checkpoints in its commits, a signal when the WAL grows
+let db = sqlite.open("app.db", .{ wal_autocheckpoint: 0 }) ! panic("%{E.message}")
+db.wal_hook(fn(pages: uint) {
+    if pages > 4000 : checkpoint_needed.send(true)  // e.g. a sync.Channel
+}) ! panic("%{E.message}")
+
+// The checkpoint thread, with its own connection
+let result = checkpointer.checkpoint(sqlite.Checkpoint.passive) ! panic("%{E.message}")
+```
+
+`checkpoint` takes `passive` (the default; never waits), `full`, `restart` or `truncate` (also
+empties the `-wal` file), and returns the pages in the WAL, the pages copied and whether it
+gave up waiting (`busy`). The hook runs inside every commit, on the thread of the connection,
+and may not use the connection. Setting a hook turns the automatic checkpoint off;
+`set_wal_autocheckpoint(pages)` sets it again, replacing the hook.
+
+## Raw handles
+
+`db.handle()` and `statement.handle()` return the `sqlite3*` and `sqlite3_stmt*`, for a SQLite
+function this package does not bind. They are unsafe: invalid once closed, and a statement
+stepped or reset behind the package's back confuses the connection.
+
+```rust
+extern fn sqlite3_db_filename(db: ptr, name: cstring) ?cstring;
+
+@unsafe
+let file = sqlite3_db_filename(db.handle(), "main".data_cstring)
+```
+
 ## Errors
 
 Every method throws `sqlite.Error`. `result_code` holds SQLite's own result code, extended
@@ -293,6 +340,9 @@ let adults = find.select(.{ "age" => 18 }) ! panic("%{E.message}")
 A statement has `run`, `select`, `value` and `query`, like the connection; after `query` the rows
 are read with `db.fetch_row` or `db.next_row`. Values from a map go in by name and every
 placeholder needs one. `close` releases the statement, and closing the connection releases them all.
+
+`statement.reset()` stops a statement that is in the middle of its rows, like `db.finish()`;
+its bound values stay, and it runs again from the start.
 
 Values can also be bound by position, counted from 1, which takes no map and fills `?` too. A value
 stays bound across runs until it is bound again:
@@ -359,6 +409,6 @@ against it from `vendor/`.
 
 ## Not supported
 
-The update, commit and authorizer hooks are not bound, and neither are extensions, encryption,
+The update, commit and authorizer hooks are not bound (the WAL hook is), and neither are extensions, encryption,
 and the session and serialization interfaces. Scalar functions, aggregates and collations are,
 see above.

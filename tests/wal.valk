@@ -1,0 +1,123 @@
+use sqlite
+use valk.fs
+use valk.thread
+
+fn write_rows(db: sqlite.Connection, count: uint) !sqlite.Error {
+    let i: uint = 0
+    while i++ < count : db.run("INSERT INTO t (data) VALUES (:n || hex(randomblob(250)))", .{ "n" => i }) !>
+}
+
+test "Checkpoint by hand" {
+    let path = temp_path("checkpoint")
+    let db = sqlite.open(path, .{ wal_autocheckpoint: 0 }) ! { println(E.message) assert(false) return }
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT)") ! { assert(false) return }
+    write_rows(db, 200) ! { assert(false) return }
+    assert((fs.size(path + "-wal") ! { assert(false) return }) > 0)
+
+    let passive = db.checkpoint() ! { println(E.message) assert(false) return }
+    assert(passive.wal_pages > 0)
+    assert(passive.checkpointed_pages == passive.wal_pages)
+    assert(!passive.busy)
+
+    let truncated = db.checkpoint(sqlite.Checkpoint.truncate) ! { assert(false) return }
+    assert(!truncated.busy)
+    assert((fs.size(path + "-wal") ! { assert(false) return }) == 0)
+    assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 200)
+    db.close()
+
+    // Not in WAL mode there is nothing to do
+    let mem = sqlite.open_memory() ! { assert(false) return }
+    let none = mem.checkpoint() ! { assert(false) return }
+    assert(none.wal_pages == 0)
+    mem.close()
+    remove_database(path)
+}
+
+test "Automatic checkpoints" {
+    let path = temp_path("autocheckpoint")
+    let db = sqlite.open(path) ! { assert(false) return }
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT)") ! { assert(false) return }
+    db.set_wal_autocheckpoint(10) ! { assert(false) return }
+    write_rows(db, 100) ! { assert(false) return }
+    // A commit past 10 pages copied the WAL back, so the next one started it over
+    let small = db.checkpoint() ! { assert(false) return }
+    assert(small.wal_pages < 20)
+
+    db.set_wal_autocheckpoint(0) ! { assert(false) return }
+    write_rows(db, 300) ! { assert(false) return }
+    let big = db.checkpoint() ! { assert(false) return }
+    assert(big.wal_pages > 40)
+    db.close()
+    remove_database(path)
+}
+
+test "WAL hook" {
+    let path = temp_path("wal-hook")
+    let db = sqlite.open(path) ! { assert(false) return }
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT)") ! { assert(false) return }
+
+    let seen = Array[uint]{}
+    db.wal_hook(fn(pages: uint) { seen.append(pages) }) ! { assert(false) return }
+    write_rows(db, 300) ! { assert(false) return }
+    assert(seen.length == 300) // one call per commit
+    let last = seen.get(seen.length - 1) ! { assert(false) return }
+    let first = seen.get(0) ! { assert(false) return }
+    assert(last > first) // no automatic checkpoint while the hook is set
+    assert(last > 40)
+
+    // A transaction is one commit
+    db.begin() ! { assert(false) return }
+    write_rows(db, 5) ! { assert(false) return }
+    db.commit() ! { assert(false) return }
+    assert(seen.length == 301)
+
+    // A new hook replaces the old one
+    let other = Array[uint]{}
+    db.wal_hook(fn(pages: uint) { other.append(pages) }) ! { assert(false) return }
+    write_rows(db, 2) ! { assert(false) return }
+    assert(seen.length == 301)
+    assert(other.length == 2)
+
+    db.remove_wal_hook()
+    write_rows(db, 2) ! { assert(false) return }
+    assert(other.length == 2)
+    db.close()
+    remove_database(path)
+}
+
+test "Checkpoint from another thread" {
+    let path = temp_path("wal-thread")
+    let db = sqlite.open(path, .{ wal_autocheckpoint: 0 }) ! { assert(false) return }
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT)") ! { assert(false) return }
+
+    let sizes = Array[uint]{}
+    db.wal_hook(fn(pages: uint) { sizes.append(pages) }) ! { assert(false) return }
+    write_rows(db, 300) ! { assert(false) return }
+    let largest = sizes.get(sizes.length - 1) ! { assert(false) return }
+    assert(largest > 40)
+
+    // The checkpoint connection belongs to the thread that runs it
+    let shared_path: shared String = path + ""
+    let group = thread.ThreadGroup[uint].new()
+    group.start(fn() uint {
+        let checkpointer = sqlite.open(shared_path) ! return 0
+        defer checkpointer.close()
+        let full = checkpointer.checkpoint(sqlite.Checkpoint.full) ! return 0
+        if full.busy || full.checkpointed_pages != full.wal_pages : return 0
+        // Truncating empties the WAL, so it reports no pages
+        let truncated = checkpointer.checkpoint(sqlite.Checkpoint.truncate) ! return 0
+        if truncated.busy || truncated.wal_pages != 0 : return 0
+        return full.checkpointed_pages
+    }) ! { assert(false) return }
+    let index, copied = group.await_next() ! { assert(false) return }
+    assert(copied == largest)
+    assert((fs.size(path + "-wal") ! { assert(false) return }) == 0)
+
+    // The writer goes on, and the WAL starts over
+    write_rows(db, 1) ! { assert(false) return }
+    assert((sizes.get(sizes.length - 1) ! { assert(false) return }) < 5)
+    let after = db.checkpoint() ! { assert(false) return }
+    assert(after.wal_pages < 5)
+    db.close()
+    remove_database(path)
+}

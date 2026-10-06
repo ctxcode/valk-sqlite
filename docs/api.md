@@ -17,6 +17,8 @@ Namespaces: [main](#main)
 ## Enums for 'main'
 
 ```js
+// How hard `Connection.checkpoint` tries, the modes of `sqlite3_wal_checkpoint_v2`.
++ enum Checkpoint { passive, full, restart, truncate }
 // How SQLite keeps the rollback journal, which decides how readers and writers get along.
 + enum Journal { wal, delete, truncate, persist, memory, off, keep }
 // The kinds of `Value`, which are the storage classes of SQLite.
@@ -53,6 +55,18 @@ Namespaces: [main](#main)
 ```
 
 ```js
+// What a checkpoint did. After `truncate` both counts are 0, since the WAL is then empty.
++ class CheckpointResult {
+    // Whether a `full`, `restart` or `truncate` checkpoint gave up waiting, after the busy timeout, and copied only what it could.
+    + busy: bool
+    // The pages of the WAL that are now in the database file.
+    + checkpointed_pages: uint
+    // The pages in the WAL.
+    + wal_pages: uint
+}
+```
+
+```js
 // One connection to one database.
 + class Connection {
     // Rows changed by the last `INSERT`, `UPDATE` or `DELETE`; for a `SELECT` the number of rows that were read, known once every row has been fetched.
@@ -84,6 +98,8 @@ Namespaces: [main](#main)
     + fn bind(name: String, value: $T) void
     // Binds a value to the next `?` placeholder of the next query.
     + fn bindv(value: $T) void
+    // Copies the pages of the WAL into the database file, as a commit does on its own every 1000 pages unless `set_wal_autocheckpoint` changed that.
+    + fn checkpoint(mode: Checkpoint (Checkpoint.passive)) CheckpointResult !Error
     // Removes the values bound with `bind` and `bindv`.
     + fn clear_binds() void
     // Closes the connection and releases every prepared statement. Further calls throw `closed`.
@@ -134,8 +150,12 @@ Namespaces: [main](#main)
     + fn fetch_row(row: Map[Value]) bool !Error
     // Returns the first column of the next row, or NULL when there is no row left.
     + fn fetch_value() Value !Error
+    // Ends the running query: the rows it did not read are dropped and SQLite lets go of the statement, and of the read lock it holds. A query that was read to the end needs no call; this is for stopping early, such as after the first row.
+    + fn finish() void
     // Returns the value of `PRAGMA name`, or "" when it has none.
     + fn get_pragma(name: String) String !Error
+    // The `sqlite3*` of the connection, for calling a SQLite function this package does not wrap. Unsafe: it is invalid once the connection is closed, and it belongs to the thread of the connection like the connection itself.
+    + fn handle() ptr
     // Returns whether a transaction is open.
     + fn in_transaction() bool
     // Stops the query that is running on this connection from another thread.
@@ -152,6 +172,8 @@ Namespaces: [main](#main)
     + fn release(name: String) void !Error
     // Removes a function that was registered with `create_function`.
     + fn remove_function(name: String, arg_count: int) void !Error
+    // Removes the hook set with `wal_hook`. The automatic checkpoint stays off until `set_wal_autocheckpoint` turns it on again.
+    + fn remove_wal_hook() void
     // Rolls the open transaction back.
     + fn rollback() void !Error
     // Rolls back to a savepoint, keeping the transaction itself open.
@@ -164,8 +186,12 @@ Namespaces: [main](#main)
     + fn select(sql: String, binds: ?Map[?Value] (null)) Array[Map[Value]] !Error
     // Runs `PRAGMA name = value`, for a setting this package has no option for.
     + fn set_pragma(name: String, value: String) void !Error
+    // Sets after how many pages in the WAL a commit checkpoints it; 0 turns the automatic checkpoint off, so that only `checkpoint` does it. SQLite's default is 1000.
+    + fn set_wal_autocheckpoint(pages: uint) void !Error
     // Runs a statement that answers with one value, and returns it.
     + fn value(sql: String, binds: ?Map[?Value] (null)) Value !Error
+    // Calls `handler` after every commit to the WAL, with the number of pages the WAL then holds. That is the moment to tell a checkpoint thread that the WAL grew past a limit.
+    + fn wal_hook(handler: fn(uint)()) void !Error
 }
 ```
 
@@ -184,6 +210,8 @@ Namespaces: [main](#main)
     + read_only: bool
     // Whether the path may be a `file:` URI with settings of its own.
     + uri: bool
+    // After how many pages in the WAL a commit checkpoints it, see `Connection.set_wal_autocheckpoint`; 0 turns that off. Null keeps SQLite's 1000.
+    + wal_autocheckpoint: ?uint
 }
 ```
 
@@ -209,8 +237,12 @@ Namespaces: [main](#main)
     + fn bind_value(index: uint, value: Value) void
     // Releases the statement. Running it afterwards throws `closed`.
     + fn close() void
+    // The `sqlite3_stmt*` of the statement, for calling a SQLite function this package does not wrap. Unsafe: it is invalid once the statement is closed, and stepping or resetting it directly confuses the connection.
+    + fn handle() ptr
     // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `next_row`, `fetch_row`, `fetch_one`, `fetch_all` or `fetch_value` of the connection.
     + fn query(values: ?Map[?Value] (null)) void !Error
+    // Stops the statement when it is running, dropping the rows that were not read, so that SQLite lets go of what it holds. Its bound values stay. Running it again resets it as well, so this is only needed to let go early.
+    + fn reset() void
     // Runs the statement and returns how many rows it changed.
     + fn run(values: ?Map[?Value] (null)) uint !Error
     // Runs the statement and returns every row it answered with.

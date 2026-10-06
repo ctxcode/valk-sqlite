@@ -38,6 +38,9 @@ use valk.fs
     + journal: Journal (Journal.wal)
     /// Whether the path may be a `file:` URI with settings of its own.
     + uri: bool (false)
+    /// After how many pages in the WAL a commit checkpoints it, see
+    /// `Connection.set_wal_autocheckpoint`; 0 turns that off. Null keeps SQLite's 1000.
+    + wal_autocheckpoint: ?uint (null)
 }
 
 /// Opens a database file, creating it when it does not exist.
@@ -145,6 +148,31 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         if !this.in_memory && options.journal != Journal.keep {
             this.exec("PRAGMA journal_mode = " + journal_name(options.journal)) !>
         }
+        let pages = options.wal_autocheckpoint
+        if isset(pages) : this.set_wal_autocheckpoint(pages) !>
+    }
+
+    /// Ends the running query: the rows it did not read are dropped and SQLite lets go of the
+    /// statement, and of the read lock it holds. A query that was read to the end needs no
+    /// call; this is for stopping early, such as after the first row.
+    ///
+    /// ```valk
+    /// db.query("SELECT id FROM users WHERE name = :name", .{ "name" => name }) ! panic("%{E.message}")
+    /// let found = db.next_row() ! panic("%{E.message}")
+    /// let id = found ? db.col_int(0) : 0
+    /// db.finish()
+    /// ```
+    ///
+    /// Starting another query ends the running one as well.
+    + fn finish() {
+        this.stop()
+    }
+
+    /// The `sqlite3*` of the connection, for calling a SQLite function this package does not
+    /// wrap. Unsafe: it is invalid once the connection is closed, and it belongs to the thread
+    /// of the connection like the connection itself.
+    + fn handle() ptr {
+        return this.db.@cast(ptr)
     }
 
     /// Runs one or more statements and reads no rows, for schema changes and scripts.
@@ -226,6 +254,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         this.order.clear()
         this.release_functions()
         this.release_aggregates()
+        this.release_wal_hook()
         this.current = null
         sqlite3_close_v2(this.db)
     }
@@ -234,7 +263,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
     fn stop() {
         let current = this.current
         if isset(current) {
-            current.reset()
+            current.rewind()
             this.current = null
         }
         this.state = STATE_IDLE

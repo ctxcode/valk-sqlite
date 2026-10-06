@@ -150,9 +150,28 @@ value STATE_DONE (2)
         this.finalize()
     }
 
+    /// Stops the statement when it is running, dropping the rows that were not read, so that
+    /// SQLite lets go of what it holds. Its bound values stay. Running it again resets it as
+    /// well, so this is only needed to let go early.
+    + fn reset() {
+        let current = this.con.current
+        if isset(current) && current == this {
+            this.con.stop()
+            return
+        }
+        this.rewind()
+    }
+
+    /// The `sqlite3_stmt*` of the statement, for calling a SQLite function this package does not
+    /// wrap. Unsafe: it is invalid once the statement is closed, and stepping or resetting it
+    /// directly confuses the connection.
+    + fn handle() ptr {
+        return this.stmt.@cast(ptr)
+    }
+
     // Puts the statement back in the state it was prepared in. A statement from `prepare`
     // keeps its values, which `bind` promises
-    fn reset() {
+    fn rewind() {
         @unsafe
         if this.finalized : return
         sqlite3_reset(this.stmt)

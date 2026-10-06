@@ -1,0 +1,111 @@
+use sqlite
+
+extern fn sqlite3_db_filename(db: ptr, name: cstring) ?cstring;
+extern fn sqlite3_stmt_readonly(stmt: ptr) i32;
+
+fn open_with_rows(path: String) sqlite.Connection !sqlite.Error {
+    let db = sqlite.open(path, .{ busy_timeout_ms: 50, wal_autocheckpoint: 0 }) !>
+    db.exec("CREATE TABLE IF NOT EXISTS t (n INTEGER)") !>
+    db.begin() !>
+    let i: uint = 0
+    while i++ < 10 : db.run("INSERT INTO t VALUES (:n)", .{ "n" => i }) !>
+    db.commit() !>
+    return db
+}
+
+// A truncating checkpoint has to wait for every reader, so it tells whether a read is still open
+fn reader_holds_wal(path: String) bool {
+    let other = sqlite.open(path, .{ busy_timeout_ms: 50 }) ! { assert(false) return false }
+    defer other.close()
+    let result = other.checkpoint(sqlite.Checkpoint.truncate) ! { println(E.message) assert(false) return false }
+    return result.busy
+}
+
+test "Finish a query early" {
+    let path = temp_path("finish")
+    let db = open_with_rows(path) ! { println(E.message) assert(false) return }
+
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_int(0) == 1)
+    assert(reader_holds_wal(path))
+
+    db.finish()
+    assert(!reader_holds_wal(path))
+    assert(!(db.next_row() ! { assert(false) return }))
+    db.finish() // twice is fine
+
+    // fetch_row stops the same way
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    let row: Map[sqlite.Value] = .{}
+    assert(db.fetch_row(row) ! { assert(false) return })
+    db.finish()
+    assert(!reader_holds_wal(path))
+
+    // A new query ends an unfinished one
+    db.query("SELECT n FROM t ORDER BY n") ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    let count = (db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int()
+    assert(count == 10)
+    assert(!reader_holds_wal(path))
+
+    db.close()
+    remove_database(path)
+}
+
+test "Reset a prepared statement and run it again" {
+    let path = temp_path("reset")
+    let db = open_with_rows(path) ! { println(E.message) assert(false) return }
+
+    let find = db.prepare("SELECT n FROM t WHERE n >= ? ORDER BY n") ! { assert(false) return }
+    find.bind(1, 4)
+    find.query() ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_int(0) == 4)
+    assert(reader_holds_wal(path))
+
+    find.reset()
+    assert(!reader_holds_wal(path))
+    assert(!(db.next_row() ! { assert(false) return }))
+    find.reset() // an idle statement is left alone
+
+    // It runs again from the start, with the value it had
+    find.query() ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_int(0) == 4)
+    assert(db.next_row() ! { assert(false) return })
+    assert(db.col_int(0) == 5)
+
+    // Running it again while it is in the middle also starts over
+    let first = find.value() ! { assert(false) return }
+    assert(first.to_int() == 4)
+    let rows = find.select() ! { assert(false) return }
+    assert(rows.length == 7)
+
+    // So does a query on the connection in between
+    find.query() ! { assert(false) return }
+    assert(db.next_row() ! { assert(false) return })
+    db.run("INSERT INTO t VALUES (11)") ! { assert(false) return }
+    assert((find.select() ! { assert(false) return }).length == 8)
+
+    find.close()
+    db.close()
+    remove_database(path)
+}
+
+test "Raw handles" {
+    @unsafe
+    let path = temp_path("handle")
+    let db = sqlite.open(path) ! { assert(false) return }
+    let name = sqlite3_db_filename(db.handle(), "main".data_cstring) ?! { assert(false) return }
+    assert(name.to(String).ends_with("handle.db"))
+
+    let read = db.prepare("SELECT 1") ! { assert(false) return }
+    let write = db.prepare("CREATE TABLE t (n INTEGER)") ! { assert(false) return }
+    assert(sqlite3_stmt_readonly(read.handle()) == 1)
+    assert(sqlite3_stmt_readonly(write.handle()) == 0)
+    read.close()
+    write.close()
+    db.close()
+    remove_database(path)
+}

@@ -50,7 +50,7 @@ extend Connection {
             throw E
         }
         this.bind_values(statement) ! {
-            statement.reset()
+            statement.rewind()
             this.clear_binds()
             throw E
         }
@@ -120,7 +120,7 @@ extend Connection {
                     continue
                 }
                 bind_value(statement.stmt, index, value) ! {
-                    statement.reset()
+                    statement.rewind()
                     throw E { sql: statement.sql }
                 }
             }
@@ -143,13 +143,13 @@ extend Connection {
             this.state = STATE_DONE
             this.read_column_names(statement)
             this.read_counters()
-            statement.reset()
+            statement.rewind()
             this.current = null
             return
         }
         this.state = STATE_IDLE
         this.current = null
-        statement.reset()
+        statement.rewind()
         this.fail(step, statement.sql)
     }
 
@@ -255,13 +255,13 @@ extend Connection {
         this.current = null
         let rows = this.affected_rows
         if step != SQLITE_DONE {
-            statement.reset()
+            statement.rewind()
             this.fail(step, statement.sql)
         }
         this.read_counters()
         // A SELECT changes nothing, so the row count is the more useful number
         if statement.column_count > 0 : this.affected_rows = rows
-        statement.reset()
+        statement.rewind()
     }
 
     fn read_column_names(statement: Statement) {
@@ -289,7 +289,7 @@ extend Connection {
             this.cache(sql, statement)
             return statement
         }
-        cached.reset()
+        cached.rewind()
         this.touch(sql)
         return cached
     }

@@ -1,0 +1,132 @@
+// WAL checkpoints and the hook that runs after every commit to the WAL.
+//
+// The hook is found the way functions are: SQLite gets an id as `pApp`, and the closure sits in
+// a per-thread registry. A commit runs on the thread of its connection, which registered it.
+
+global wal_hooks: HashMap[uint, WalHook] (.{})
+global next_wal_hook_id: uint (1)
+
+class WalHook {
+    handler: fn(uint)()
+}
+
+/// How hard `Connection.checkpoint` tries, the modes of `sqlite3_wal_checkpoint_v2`.
++ enum Checkpoint {
+    /// Copies what it can without waiting for readers or writers.
+    passive
+    /// Waits for the writer and for readers on older data, then copies the whole WAL.
+    full
+    /// Like `full`, and also waits until no reader uses the WAL, so the next writer starts it
+    /// over from the beginning.
+    restart
+    /// Like `restart`, and also truncates the WAL file to zero bytes.
+    truncate
+}
+
+/// What a checkpoint did. After `truncate` both counts are 0, since the WAL is then empty.
++ class CheckpointResult {
+    /// The pages in the WAL.
+    + wal_pages: uint (0)
+    /// The pages of the WAL that are now in the database file.
+    + checkpointed_pages: uint (0)
+    /// Whether a `full`, `restart` or `truncate` checkpoint gave up waiting, after the busy
+    /// timeout, and copied only what it could.
+    + busy: bool (false)
+}
+
+extend Connection {
+    wal_hook_id: uint (0)
+
+    /// Copies the pages of the WAL into the database file, as a commit does on its own every
+    /// 1000 pages unless `set_wal_autocheckpoint` changed that.
+    ///
+    /// A program that writes a lot can turn the automatic checkpoint off on its writers and run
+    /// this from a connection of its own on another thread, so that no commit has to wait for
+    /// one. Any running query on this connection is ended first.
+    ///
+    /// ```valk
+    /// let result = db.checkpoint(sqlite.Checkpoint.truncate) ! panic("%{E.message}")
+    /// ```
+    + fn checkpoint(mode: Checkpoint (Checkpoint.passive)) CheckpointResult !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        this.stop()
+        let log: i32 = 0
+        let done: i32 = 0
+        let code = sqlite3_wal_checkpoint_v2(this.db, null, checkpoint_mode(mode), @ref(log), @ref(done))
+        let busy = (code & 0xff) == SQLITE_BUSY
+        if code != SQLITE_OK && !busy : this.fail(code, "PRAGMA wal_checkpoint")
+        // Both are -1 when the database is not in WAL mode
+        return CheckpointResult {
+            wal_pages: log > 0 ? log.to(uint) : 0
+            checkpointed_pages: done > 0 ? done.to(uint) : 0
+            busy: busy
+        }
+    }
+
+    /// Sets after how many pages in the WAL a commit checkpoints it; 0 turns the automatic
+    /// checkpoint off, so that only `checkpoint` does it. SQLite's default is 1000.
+    ///
+    /// SQLite does this with the WAL hook, so this removes a hook set with `wal_hook`, and
+    /// `wal_hook` turns the automatic checkpoint off.
+    + fn set_wal_autocheckpoint(pages: uint) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        this.release_wal_hook()
+        let code = sqlite3_wal_autocheckpoint(this.db, pages.to(i32))
+        if code != SQLITE_OK : this.fail(code, "PRAGMA wal_autocheckpoint")
+    }
+
+    /// Calls `handler` after every commit to the WAL, with the number of pages the WAL then
+    /// holds. That is the moment to tell a checkpoint thread that the WAL grew past a limit.
+    ///
+    /// The handler runs inside the commit, on the thread of this connection, and may not use
+    /// the connection; keep it short, such as sending to a channel. Setting a hook turns the
+    /// automatic checkpoint off, and replaces an earlier hook.
+    ///
+    /// ```valk
+    /// db.wal_hook(fn(pages: uint) {
+    ///     if pages > 4000 : checkpoints.send(pages)
+    /// }) ! panic("%{E.message}")
+    /// ```
+    + fn wal_hook(handler: fn(uint)()) !Error {
+        @unsafe
+        if this.closed : throw .closed { message: "The connection is closed" }
+        let old = this.wal_hook_id
+        let id = next_wal_hook_id++
+        wal_hooks.set(id, WalHook { handler: handler })
+        let trampoline: fnptr(?ptr, DB, cstring, i32)(i32) = call_wal_hook
+        sqlite3_wal_hook(this.db, trampoline.@cast(ptr), id.@cast(ptr))
+        this.wal_hook_id = id
+        if old > 0 : wal_hooks.remove(old)
+    }
+
+    /// Removes the hook set with `wal_hook`. The automatic checkpoint stays off until
+    /// `set_wal_autocheckpoint` turns it on again.
+    + fn remove_wal_hook() {
+        @unsafe
+        if this.closed || this.wal_hook_id == 0 : return
+        sqlite3_wal_hook(this.db, null, null)
+        this.release_wal_hook()
+    }
+
+    fn release_wal_hook() {
+        if this.wal_hook_id == 0 : return
+        wal_hooks.remove(this.wal_hook_id)
+        this.wal_hook_id = 0
+    }
+}
+
+fn call_wal_hook(app: ?ptr, db: DB, name: cstring, pages: i32) i32 {
+    if !isset(app) : return SQLITE_OK
+    let hook = wal_hooks.get(app.@cast(uint)) ! return SQLITE_OK
+    hook.handler(pages > 0 ? pages.to(uint) : 0)
+    return SQLITE_OK
+}
+
+fn checkpoint_mode(mode: Checkpoint) i32 {
+    if mode == Checkpoint.full : return 1
+    if mode == Checkpoint.restart : return 2
+    if mode == Checkpoint.truncate : return 3
+    return 0
+}
