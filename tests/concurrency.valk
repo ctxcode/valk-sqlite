@@ -1,6 +1,5 @@
 use sqlite
 use valk.thread
-use valk.time
 
 test "Large values" {
     let db = memory() ! { assert(false) return }
@@ -56,7 +55,7 @@ test "Two threads with a connection each" {
     setup.close()
 
     // Every thread opens its own connection, as the package asks
-    let shared_path: shared String = path + ""
+    let shared_path: atomic String = path + ""
     let group = thread.ThreadGroup[uint].new()
     let worker: uint = 0
     while worker++ < 4 {
@@ -80,7 +79,7 @@ test "Two threads with a connection each" {
     }
     let total: uint = 0
     while group.has_pending() {
-        let index, written = group.await_next() ! break
+        let _, written = group.await_next() ! break
         total += written
     }
 

@@ -33,7 +33,7 @@ value STATE_DONE (2)
 
     // A prepared statement is a handle into SQLite, not a value: a copy would finalize the same
     // statement twice, so a clone is the same statement
-    fn clone() SELF $clone {
+    fn clone() SELF {
         return this
     }
 

@@ -97,7 +97,7 @@ test "Checkpoint from another thread" {
     assert(largest > 40)
 
     // The checkpoint connection belongs to the thread that runs it
-    let shared_path: shared String = path + ""
+    let shared_path: atomic String = path + ""
     let group = thread.ThreadGroup[uint].new()
     group.start(fn() uint {
         let checkpointer = sqlite.open(shared_path) ! return 0
@@ -109,7 +109,7 @@ test "Checkpoint from another thread" {
         if truncated.busy || truncated.wal_pages != 0 : return 0
         return full.checkpointed_pages
     }) ! { assert(false) return }
-    let index, copied = group.await_next() ! { assert(false) return }
+    let _, copied = group.await_next() ! { assert(false) return }
     assert(copied == largest)
     assert((fs.size(path + "-wal") ! { assert(false) return }) == 0)
 
