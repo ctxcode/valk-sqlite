@@ -7,7 +7,7 @@ test-basics:
 deps:
 	vman install
 lint:
-	$(vc) build ./src --lint
+	$(vc) build ./src --lint --deny-warnings
 example:
 	$(vc) build ./example --run
 docs:
