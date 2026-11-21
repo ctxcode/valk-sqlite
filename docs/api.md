@@ -7,13 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (open, syntax, constraint, busy, readonly, corrupt, interrupted, error, closed) payload { message: String, result_code: int (0), sql: String ("") }
-```
-
 ## Enums for 'main'
 
 ```js
@@ -192,6 +185,26 @@ Namespaces: [main](#main)
     + fn value(sql: String, binds: ?Map[?Value] (null)) Value !Error
     // Calls `handler` after every commit to the WAL, with the number of pages the WAL then holds. That is the moment to tell a checkpoint thread that the WAL grew past a limit.
     + fn wal_hook(handler: fn(uint)()) void !Error
+}
+```
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    open(String, int, String)
+    syntax(String, int, String)
+    constraint(String, int, String)
+    busy(String, int, String)
+    readonly(String, int, String)
+    corrupt(String, int, String)
+    interrupted(String, int, String)
+    error(String, int, String)
+    closed(String, int, String)
+
+    + get message: String
+    + get result_code: int
+    + get sql: String
+    + fn to_string() String
 }
 ```
 

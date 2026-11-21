@@ -4,7 +4,7 @@
 A SQLite client for [Valk](https://valk-lang.dev). It binds the SQLite C library, so the
 database runs inside your program: no server, no port, no credentials, one file.
 
-Requires Valk 0.7.3 or newer, and SQLite 3.24 or newer on the system:
+Requires Valk 0.9.1 or newer, and SQLite 3.24 or newer on the system:
 
 | system | install |
 | --- | --- |
@@ -299,24 +299,23 @@ let file = sqlite3_db_filename(db.handle(), "main".data_cstring)
 
 ## Errors
 
-Every method throws `sqlite.Error`. `result_code` holds SQLite's own result code, extended
-where SQLite has one, and `sql` the statement that failed:
+Every method throws `sqlite.Error`, a tagged union whose variants carry `(message, result_code, sql)` with `E.message`, `E.result_code`, `E.sql`, and `E.to_string()` getters. `result_code` holds SQLite's own result code, extended where SQLite has one, and `sql` the statement that failed:
 
-| code | when |
+| variant | when |
 | --- | --- |
-| `open` | the file could not be opened or created |
-| `syntax` | the SQL could not be prepared: a typo, an unknown table or column |
-| `constraint` | a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken |
-| `busy` | another connection held the database for longer than the busy timeout |
-| `readonly` | the database is read-only |
-| `corrupt` | the file is not a database, or it is damaged |
-| `interrupted` | `interrupt` was called from another thread while the query ran |
-| `error` | any other answer from SQLite |
-| `closed` | the connection is closed |
+| `.open` | the file could not be opened or created |
+| `.syntax` | the SQL could not be prepared: a typo, an unknown table or column |
+| `.constraint` | a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken |
+| `.busy` | another connection held the database for longer than the busy timeout |
+| `.readonly` | the database is read-only |
+| `.corrupt` | the file is not a database, or it is damaged |
+| `.interrupted` | `interrupt` was called from another thread while the query ran |
+| `.error` | any other answer from SQLite |
+| `.closed` | the connection is closed |
 
 ```rust
 db.run("INSERT INTO users (email) VALUES (:email)", .{ "email" => email }) ! {
-    if error_is(E.code, constraint) : return "that email is already taken"
+    if E is .constraint : return "that email is already taken"
     throw E
 }
 ```

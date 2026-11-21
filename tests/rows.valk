@@ -147,7 +147,7 @@ test "Positional binds" {
     find.bind(7, 1)
     let range = false
     find.query() ! {
-        range = error_is(E.code, syntax)
+        range = E is .syntax
     }
     assert(range)
     find.query() ! { assert(false) return }

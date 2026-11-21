@@ -58,7 +58,7 @@ test "Prepared statements" {
     // A missing value throws
     let missing = false
     insert.run(.{ "name" => "x" }) ! {
-        missing = error_is(E.code, syntax)
+        missing = E is .syntax
     }
     assert(missing)
 
@@ -66,7 +66,7 @@ test "Prepared statements" {
     insert.close()
     let closed = false
     insert.run(.{ "name" => "x", "age" => 1 }) ! {
-        closed = error_is(E.code, closed)
+        closed = E is .closed
     }
     assert(closed)
     insert.close()
@@ -84,13 +84,13 @@ test "Prepared statement errors" {
     let positional = false
     let by_position = db.prepare("SELECT * FROM t WHERE n = ?") ! { assert(false) return }
     by_position.query(.{ "n" => 1 }) ! {
-        positional = error_is(E.code, syntax)
+        positional = E is .syntax
     }
     assert(positional)
 
     let syntax = false
     db.prepare("SELEC 1") ! {
-        syntax = error_is(E.code, syntax)
+        syntax = E is .syntax
     }
     assert(syntax)
 
@@ -98,7 +98,7 @@ test "Prepared statement errors" {
     insert.run(.{ "n" => 1 }) ! { assert(false) return }
     let clash = false
     insert.run(.{ "n" => 1 }) ! {
-        clash = error_is(E.code, constraint)
+        clash = E is .constraint
     }
     assert(clash)
     // The statement still works after an error
@@ -118,7 +118,7 @@ test "Prepared statement errors" {
     other.close()
     let closed = false
     one.value() ! {
-        closed = error_is(E.code, closed)
+        closed = E is .closed
     }
     assert(closed)
 }

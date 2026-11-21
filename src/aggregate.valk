@@ -57,7 +57,7 @@ extend Connection {
     /// ```
     + fn create_aggregate(name: String, arg_count: int, new_state: fn()(Aggregate), deterministic: bool (false)) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
 
         let id = next_function_id++
         registered_aggregates.set(id, AggregateFunction { name: name, new_state: new_state })
@@ -94,7 +94,7 @@ extend Connection {
     /// ```
     + fn create_collation(name: String, compare: fn(String, String)(int)) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
 
         let id = next_function_id++
         registered_collations.set(id, CollationFunction { name: name, compare: compare })
@@ -165,9 +165,9 @@ fn call_aggregate_final(context: CONTEXT) {
 fn aggregate_state(context: CONTEXT) Aggregate !Error {
     @unsafe
     let data = sqlite3_user_data(context)
-    if !isset(data) : throw .error { message: "This aggregate function is not registered" }
+    if !isset(data) : throw .error("This aggregate function is not registered", 0, "")
     let entry = registered_aggregates.get(data.@cast(uint)) ! {
-        throw .error { message: "This aggregate function is no longer registered" }
+        throw .error("This aggregate function is no longer registered", 0, "")
     }
 
     // Eight bytes of scratch per aggregation, which hold the id of the state object. A `FINAL`
@@ -178,7 +178,7 @@ fn aggregate_state(context: CONTEXT) Aggregate !Error {
     let id = slot.@cast(*uint)[0]
     if id != 0 {
         return live_aggregates.get(id) ! {
-            throw .error { message: "The state of this aggregation is gone" }
+            throw .error("The state of this aggregation is gone", 0, "")
         }
     }
 

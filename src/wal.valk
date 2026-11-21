@@ -49,7 +49,7 @@ extend Connection {
     /// ```
     + fn checkpoint(mode: Checkpoint (Checkpoint.passive)) CheckpointResult !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
         this.stop()
         let log: i32 = 0
         let done: i32 = 0
@@ -71,7 +71,7 @@ extend Connection {
     /// `wal_hook` turns the automatic checkpoint off.
     + fn set_wal_autocheckpoint(pages: uint) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
         this.release_wal_hook()
         let code = sqlite3_wal_autocheckpoint(this.db, pages.to(i32))
         if code != SQLITE_OK : this.fail(code, "PRAGMA wal_autocheckpoint")
@@ -91,7 +91,7 @@ extend Connection {
     /// ```
     + fn wal_hook(handler: fn(uint)()) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
         let old = this.wal_hook_id
         let id = next_wal_hook_id++
         wal_hooks.set(id, WalHook { handler: handler })

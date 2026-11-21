@@ -8,12 +8,13 @@ test "Errors" {
 
     // A broken rule
     db.run("INSERT INTO users (email) VALUES ('a@b.c')") ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert(E.message.contains("UNIQUE"))
+        assert(E.to_string() == E.message)
         assert(E.result_code > 0)
     }
     db.run("INSERT INTO users (email) VALUES (NULL)") ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
     }
 
     // The connection keeps working after an error
@@ -21,11 +22,11 @@ test "Errors" {
 
     // SQL that cannot be prepared
     db.query("SELEC 1") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.sql == "SELEC 1")
     }
     db.query("SELECT * FROM missing_table") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.message.contains("no such table"))
     }
     assert((db.value("SELECT 1") ! { assert(false) return }).to_int() == 1)
@@ -33,7 +34,7 @@ test "Errors" {
     // Foreign keys are enforced, unlike in bare SQLite
     db.exec("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id))") ! { assert(false) return }
     db.run("INSERT INTO posts (user_id) VALUES (999)") ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert(E.message.contains("FOREIGN KEY"))
     }
 
@@ -41,7 +42,7 @@ test "Errors" {
     db.close()
     assert(db.closed)
     db.query("SELECT 1") ! {
-        assert(error_is(E.code, closed))
+        assert(E is .closed)
         return
     }
     assert(false)

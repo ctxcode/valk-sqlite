@@ -48,7 +48,7 @@ test "Custom functions" {
 
     // An error the handler throws reaches the query
     db.create_function("refuse", 1, fn(args: Array[sqlite.Value]) sqlite.Value !sqlite.Error {
-        throw .error { message: "this argument is not allowed" }
+        throw .error("this argument is not allowed", 0, "")
     }) ! { assert(false) return }
     db.value("SELECT refuse(1)") ! {
         assert(E.message.contains("not allowed"))
@@ -102,7 +102,7 @@ test "Functions are removed with the connection" {
 
     db.remove_function("temporary_one", 0) ! { assert(false) return }
     db.query("SELECT temporary_one()") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.message.contains("no such function"))
         db.close()
         return

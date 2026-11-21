@@ -46,7 +46,7 @@ test "Read only" {
     assert((reader.value("SELECT a FROM t") ! { assert(false) return }).to_string() == "x")
 
     reader.run("INSERT INTO t VALUES ('y')") ! {
-        assert(error_is(E.code, readonly))
+        assert(E is .readonly)
         remove_database(path)
         return
     }
@@ -57,7 +57,7 @@ test "Missing file" {
     let path = temp_path("missing")
     // Without `create` an absent file is an error instead of a new database
     sqlite.open(path, .{ create: false }) ! {
-        assert(error_is(E.code, open))
+        assert(E is .open)
         assert(!fs.exists(path))
         return
     }
@@ -76,7 +76,7 @@ test "Busy database" {
     first.run("INSERT INTO t VALUES ('one')") ! { assert(false) return }
 
     second.run("INSERT INTO t VALUES ('two')") ! {
-        assert(error_is(E.code, busy))
+        assert(E is .busy)
         assert(E.result_code > 0)
         first.commit() ! { assert(false) return }
         // Once the first one commits, the second gets through

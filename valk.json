@@ -1,17 +1,17 @@
 {
     "name": "sqlite",
-    "use": "0.8.10",
+    "use": "0.9.1",
     "require": {
         "valk": {
-            "min": "0.8.10"
+            "min": "0.9.1"
         }
     },
     "dependencies": {
         "sql": {
             "src": "github.com/ctxcode/valk-sql",
-            "version": "0.4.x",
-            "current": "0.4.0",
-            "current_hash": "ea044c647953332eb53d69e1d168a48af1386daa"
+            "version": "0.5.x",
+            "current": "0.5.0",
+            "current_hash": "e5668f1ee7f5e68edbac2bd9899d0cd325f5612f"
         }
     }
 }

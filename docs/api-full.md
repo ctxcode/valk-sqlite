@@ -7,31 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (open, syntax, constraint, busy, readonly, corrupt, interrupted, error, closed) payload { message: String, result_code: int (0), sql: String ("") }
-```
-
-### Error
-
-Thrown by every operation of this package.
-
-- `open`: the database file could not be opened or created.
-- `syntax`: the SQL could not be prepared: a typo, an unknown table or column, or a
-  placeholder that was not bound.
-- `constraint`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken.
-- `busy`: another connection held the database for longer than the busy timeout.
-- `readonly`: the database was opened read-only, or the file cannot be written.
-- `corrupt`: the file is not a database, or it is damaged.
-- `interrupted`: `interrupt` was called from another thread while the query ran.
-- `error`: any other answer from SQLite.
-- `closed`: the connection is closed.
-
-`result_code` holds the SQLite result code, extended where SQLite has one, so a caller that needs
-the exact reason can look it up; `message` is the text SQLite gave.
-
 ## Enums for 'main'
 
 ```js
@@ -738,6 +713,50 @@ db.wal_hook(fn(pages: uint) {
     if pages > 4000 : checkpoints.send(pages)
 }) ! panic("%{E.message}")
 ```
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    open(String, int, String)
+    syntax(String, int, String)
+    constraint(String, int, String)
+    busy(String, int, String)
+    readonly(String, int, String)
+    corrupt(String, int, String)
+    interrupted(String, int, String)
+    error(String, int, String)
+    closed(String, int, String)
+
+    + get message: String
+    + get result_code: int
+    + get sql: String
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown by every operation of this package.
+
+Each variant carries `(message, result_code, sql)`. `result_code` holds the SQLite result code,
+extended where SQLite has one, or `0` when there is none, so a caller that needs the exact
+reason can look it up; `message` is the text SQLite gave; `sql` holds the statement that
+failed, or `""` when none applies.
+
+- `open(message, result_code, sql)`: the database file could not be opened or created.
+- `syntax(message, result_code, sql)`: the SQL could not be prepared: a typo, an unknown table
+  or column, or a placeholder that was not bound.
+- `constraint(message, result_code, sql)`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule
+  was broken.
+- `busy(message, result_code, sql)`: another connection held the database for longer than the
+  busy timeout.
+- `readonly(message, result_code, sql)`: the database was opened read-only, or the file cannot
+  be written.
+- `corrupt(message, result_code, sql)`: the file is not a database, or it is damaged.
+- `interrupted(message, result_code, sql)`: `interrupt` was called from another thread while
+  the query ran.
+- `error(message, result_code, sql)`: any other answer from SQLite.
+- `closed(message, result_code, sql)`: the connection or statement is closed.
 
 ```js
 // The settings a database is opened with.

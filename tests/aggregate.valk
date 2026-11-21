@@ -34,7 +34,7 @@ class Joined is sqlite.Aggregate {
 
 class Refuses is sqlite.Aggregate {
     + fn step(args: Array[sqlite.Value]) !sqlite.Error {
-        throw .error { message: "this row is not allowed" }
+        throw .error("this row is not allowed", 0, "")
     }
     + fn finish() sqlite.Value !sqlite.Error {
         return sqlite.Value.null()

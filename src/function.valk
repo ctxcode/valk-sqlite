@@ -39,7 +39,7 @@ extend Connection {
     /// connection it was registered on.
     + fn create_function(name: String, arg_count: int, handler: fn(Array[Value])(Value !Error), deterministic: bool (false)) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
 
         let id = next_function_id++
         registered.set(id, SqlFunction { name: name, handler: handler })
@@ -59,7 +59,7 @@ extend Connection {
     /// Removes a function that was registered with `create_function`.
     + fn remove_function(name: String, arg_count: int) !Error {
         @unsafe
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
         let code = sqlite3_create_function_v2(this.db, name.data_cstring, arg_count.to(i32), SQLITE_UTF8, null, null, null, null, null)
         if code != SQLITE_OK : this.fail(code, "DROP FUNCTION " + name)
         // The closure stays in the registry: SQLite may still be running a statement that uses it

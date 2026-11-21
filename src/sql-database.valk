@@ -46,9 +46,7 @@ class SqlDriver is sql.Driver {
         each args as arg {
             con.bindv(to_driver_value(arg))
         }
-        translate(statement, fn() !Error {
-            con.query(statement) !>
-        }) !>
+        con.query(statement) ! throw to_sql_error(E, statement)
     }
 
     + fn last_insert_id() int {
@@ -56,22 +54,13 @@ class SqlDriver is sql.Driver {
     }
 
     + fn begin(immediate: bool) !sql.Error {
-        let con = this.con
-        translate("BEGIN", fn() !Error {
-            con.begin(immediate) !>
-        }) !>
+        this.con.begin(immediate) ! throw to_sql_error(E, "BEGIN")
     }
     + fn commit() !sql.Error {
-        let con = this.con
-        translate("COMMIT", fn() !Error {
-            con.commit() !>
-        }) !>
+        this.con.commit() ! throw to_sql_error(E, "COMMIT")
     }
     + fn rollback() !sql.Error {
-        let con = this.con
-        translate("ROLLBACK", fn() !Error {
-            con.rollback() !>
-        }) !>
+        this.con.rollback() ! throw to_sql_error(E, "ROLLBACK")
     }
 
     + fn ping() bool {
@@ -98,13 +87,13 @@ class SqlRows is sql.Rows {
     + fn next(row: Map[sql.Value]) bool !sql.Error {
         let con = this.con
         if con.query_serial != this.serial {
-            throw .error {
-                message: "These rows were dropped because another statement ran on the same connection. Read them to the end first, or walk the query with chunk_by_id, which leaves the connection free between pages."
-            }
+            throw .error(
+                "These rows were dropped because another statement ran on the same connection. Read them to the end first, or walk the query with chunk_by_id, which leaves the connection free between pages.",
+                "",
+                ""
+            )
         }
-        return translate_value[bool]("", fn() bool !Error {
-            return con.fetch_sql_row(row) !>
-        }) !>
+        return con.fetch_sql_row(row) ! throw to_sql_error(E, "")
     }
 
     + fn close() {
@@ -171,33 +160,17 @@ fn to_sql_value(value: Value) sql.Value {
     return sql.Value.of(value.string_value)
 }
 
-// An error type is not a value in valk, so a caught error cannot be handed to a function.
-// Every driver call therefore runs through here, which is the one place that maps the errors of
-// this package onto the errors of `sql`.
-fn translate_value[T](statement: String, work: fn()(T !Error)) T !sql.Error {
-    return work() ! {
-        let code = E.result_code.to(String)
-        let text = E.sql.length > 0 ? E.sql : statement
-        if error_is(E.code, open) : throw .connect { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, syntax) : throw .syntax { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, constraint) : throw .constraint { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, busy) : throw .busy { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, readonly) : throw .readonly { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: code, sql: text }
-        throw .error { message: E.message, driver_code: code, sql: text }
-    }
-}
-
-fn translate(statement: String, work: fn()(!Error)) !sql.Error {
-    work() ! {
-        let code = E.result_code.to(String)
-        let text = E.sql.length > 0 ? E.sql : statement
-        if error_is(E.code, open) : throw .connect { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, syntax) : throw .syntax { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, constraint) : throw .constraint { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, busy) : throw .busy { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, readonly) : throw .readonly { message: E.message, driver_code: code, sql: text }
-        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: code, sql: text }
-        throw .error { message: E.message, driver_code: code, sql: text }
+// Maps the errors of this package onto the errors of `sql`.
+fn to_sql_error(err: Error, statement: String) sql.Error {
+    let code = err.result_code.to(String)
+    let text = err.sql.length > 0 ? err.sql : statement
+    return match err : sql.Error {
+        .open(msg, _, _) => sql.Error.connect(msg, code, text)
+        .syntax(msg, _, _) => sql.Error.syntax(msg, code, text)
+        .constraint(msg, _, _) => sql.Error.constraint(msg, code, text)
+        .busy(msg, _, _) => sql.Error.busy(msg, code, text)
+        .readonly(msg, _, _) => sql.Error.readonly(msg, code, text)
+        .closed(msg, _, _) => sql.Error.closed(msg, code, text)
+        default => sql.Error.error(err.message, code, text)
     }
 }

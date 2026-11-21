@@ -52,11 +52,11 @@ test "Through the sql package" {
 
     // Errors arrive as sql errors
     db.exec("INSERT INTO users (id, name) VALUES (1, 'clash')") ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert(E.driver_code.length > 0)
     }
     db.exec("SELEC 1") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.sql == "SELEC 1")
     }
     // And the connection keeps working
@@ -147,7 +147,7 @@ test "Transactions through the sql package" {
         tx.exec("INSERT INTO t VALUES (3)") !>
         tx.exec("INSERT INTO nothing_here VALUES (4)") !>
     }) ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert((db.value("SELECT count(*) FROM t") ! { assert(false) return }).to_int() == 2)
         return
     }
@@ -200,7 +200,7 @@ test "A pool of real connections" {
     setup.close()
 
     let pool = sql.Pool.new(fn() sql.Db !sql.Error {
-        let con = sqlite.open(path) ! throw .connect { message: E.message }
+        let con = sqlite.open(path) ! throw .connect(E.message, E.result_code.to(String), "")
         return sqlite.database(con)
     }, 3, 2)
 

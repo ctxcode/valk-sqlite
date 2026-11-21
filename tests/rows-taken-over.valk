@@ -16,7 +16,7 @@ test "Rows that another statement took over" {
 
     // Which the walk now says, instead of quietly stopping
     rows.next(row) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("another statement ran"))
         assert(E.message.contains("chunk_by_id"))
         rows.close()

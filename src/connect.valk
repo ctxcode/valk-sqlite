@@ -81,12 +81,12 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
     let handle: ?DB = null
     let code = sqlite3_open_v2(path.data_cstring, @ref(handle), flags, null)
     if !isset(handle) {
-        throw .open { message: "Cannot open '" + path + "': out of memory", result_code: code.to(int) }
+        throw .open("Cannot open '" + path + "': out of memory", code.to(int), "")
     }
     if code != SQLITE_OK {
         let message: String = sqlite3_errmsg(handle)
         sqlite3_close_v2(handle)
-        throw .open { message: "Cannot open '" + path + "': " + message, result_code: code.to(int) }
+        throw .open("Cannot open '" + path + "': " + message, code.to(int), "")
     }
     sqlite3_extended_result_codes(handle, 1)
 
@@ -180,7 +180,7 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
     /// The statements are separated by `;`. Placeholders cannot be used here; `query` is for
     /// statements with values in them.
     + fn exec(sql: String) !Error {
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed", 0, "")
         this.stop()
         if this.debug : println("EXEC: " + sql)
         @unsafe
@@ -283,24 +283,24 @@ fn open_database(path: String, options: OpenOptions) Connection !Error {
         let result = code.to(int)
         let base = code & 0xff
         if base == SQLITE_BUSY || base == SQLITE_LOCKED {
-            throw .busy { message: message, result_code: result, sql: sql }
+            throw .busy(message, result, sql)
         }
         if base == SQLITE_CONSTRAINT {
-            throw .constraint { message: message, result_code: result, sql: sql }
+            throw .constraint(message, result, sql)
         }
         if base == SQLITE_READONLY || base == SQLITE_PERM || base == SQLITE_AUTH {
-            throw .readonly { message: message, result_code: result, sql: sql }
+            throw .readonly(message, result, sql)
         }
         if base == SQLITE_CORRUPT || base == SQLITE_NOTADB {
-            throw .corrupt { message: message, result_code: result, sql: sql }
+            throw .corrupt(message, result, sql)
         }
         if base == SQLITE_INTERRUPT {
-            throw .interrupted { message: message, result_code: result, sql: sql }
+            throw .interrupted(message, result, sql)
         }
         if base == SQLITE_ERROR || base == SQLITE_RANGE || base == SQLITE_MISMATCH {
-            throw .syntax { message: message, result_code: result, sql: sql }
+            throw .syntax(message, result, sql)
         }
-        throw .error { message: message, result_code: result, sql: sql }
+        throw .error(message, result, sql)
     }
 }
 
