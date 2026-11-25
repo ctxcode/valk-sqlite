@@ -34,7 +34,7 @@ fn fresh_direct() sqlite.Connection {
 
 fn report(label: String, start: uint) {
     let us = time.mono_us() - start
-    println(label.pad_right(' ', 34) + (us / 1000) + " ms")
+    println(label.pad_right(34) + (us / 1000) + " ms")
 }
 
 fn bench_insert_direct() {

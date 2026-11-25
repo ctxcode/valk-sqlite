@@ -45,7 +45,7 @@ fn alloc_track() {
 
 fn report_rows(label: String, start: uint, rows: uint) {
     let ns = (time.mono_us() - start) * 1000
-    println(label.pad_right(' ', 40) + (ns / rows) + " ns/row, " + (alloc_bytes / rows) + " B/row allocated")
+    println(label.pad_right(40) + (ns / rows) + " ns/row, " + (alloc_bytes / rows) + " B/row allocated")
 }
 
 fn single_map(con: sqlite.Connection) {
