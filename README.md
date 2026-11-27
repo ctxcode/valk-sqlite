@@ -33,7 +33,7 @@ building on macOS itself needs nothing.
 ## Install
 
 ```
-vman install github.com/ctxcode/valk-sqlite
+vman install github.com/zikue/valk-sqlite
 ```
 
 ## Example
@@ -381,7 +381,7 @@ doing its work.
 ## With valk-sql
 
 `sqlite.database(con)` turns a connection into a `sql.Db` of the
-[valk-sql](https://github.com/ctxcode/valk-sql) package, which gives every database the same
+[valk-sql](https://github.com/zikue/valk-sql) package, which gives every database the same
 API: a query builder, migrations, connection pools, and rows read into your own classes. The
 same program then runs on another database by opening it with that driver instead.
 
